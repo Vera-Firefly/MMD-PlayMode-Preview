@@ -717,7 +717,8 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
         {
             try
             {
-                batchSession = VmdMotionConverter.CreateManagedBatchSession(modelPath, curveReductionError);
+                batchSession = VmdMotionConverter.CreateManagedBatchSession(
+                    modelPath, curveReductionError, targetUpperLimbInverseSolve);
                 AssetDatabase.StartAssetEditing();
                 assetEditing = true;
             }
@@ -981,7 +982,7 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
         try
         {
             batchSession = VmdMotionConverter.CreateManagedBatchSession(
-                modelPath, curveReductionError, !targetCalibratedExport);
+                modelPath, curveReductionError, targetUpperLimbInverseSolve);
             if (!directExport && pending.Count > 1)
             {
                 AssetDatabase.StartAssetEditing();

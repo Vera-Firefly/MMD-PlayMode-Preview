@@ -45,6 +45,7 @@ internal sealed class ConverterWindowContext
     [SerializeField] private MotionOutputType motionOutputType;
     [SerializeField] private float fkRotationErrorDegrees = 0.01f;
     [SerializeField] private float fkPositionError = 0.00005f;
+    [SerializeField] private bool targetUpperLimbInverseSolve;
     internal MmdPlayModePreview TargetPreview
     {
         get => targetPreview;
@@ -74,6 +75,11 @@ internal sealed class ConverterWindowContext
     {
         get => fkPositionError;
         set => fkPositionError = value;
+    }
+    internal bool TargetUpperLimbInverseSolve
+    {
+        get => targetUpperLimbInverseSolve;
+        set => targetUpperLimbInverseSolve = value;
     }
     internal ConverterEditorLanguage Language
     {
@@ -134,6 +140,11 @@ internal abstract class ConverterFeaturePage
     {
         get => Context.FkPositionError;
         set => Context.FkPositionError = value;
+    }
+    protected bool targetUpperLimbInverseSolve
+    {
+        get => Context.TargetUpperLimbInverseSolve;
+        set => Context.TargetUpperLimbInverseSolve = value;
     }
     protected MmdPlayModePreview targetPreview
     {

@@ -29,6 +29,11 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
         // curves. 1e-4 is far below visible Humanoid muscle/root-motion changes.
         // Set to zero to retain every baked sample.
         public float CurveReductionError = 0.0001f;
+        // Debug compatibility path for target-calibrated Humanoid output. When enabled,
+        // upper-limb muscles are extracted from the target FK reconstruction instead of
+        // the canonical PMX Humanoid rig. This can help unusual Avatar definitions, but
+        // is less stable around arm/forearm twist branches, so it is disabled by default.
+        public bool TargetUpperLimbInverseSolve;
         public PmxEvaluationOptions Evaluation = new PmxEvaluationOptions();
     }
 

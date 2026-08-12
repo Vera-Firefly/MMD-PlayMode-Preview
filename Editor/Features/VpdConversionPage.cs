@@ -341,11 +341,12 @@ internal sealed class VpdConversionPage : ConverterFeaturePage
                 PositionScale = 0.08f,
                 CoordinateConversion = PmxCoordinateConversion.RotateY180,
                 BakeMorphs = true,
-                CurveReductionError = Mathf.Clamp(curveReductionError, 0f, 0.001f)
+                CurveReductionError = Mathf.Clamp(curveReductionError, 0f, 0.001f),
+                TargetUpperLimbInverseSolve = targetUpperLimbInverseSolve
             };
             bool targetCalibrated = vpdOutputType == MotionOutputType.TargetCalibratedHumanoid;
             batchSession = new PmxHumanoidAnimationClipBaker.BatchSession(
-                model, options, !targetCalibrated);
+                model, options);
 
             for (int fileIndex = 0; fileIndex < sourcePaths.Count; fileIndex++)
             {

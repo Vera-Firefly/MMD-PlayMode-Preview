@@ -130,6 +130,21 @@ internal sealed class PmxSettingsPage : ConverterFeaturePage
         debugBakeMorphs = EditorGUILayout.Toggle(
             L("烘焙同名形态键", "Bake Same-name Morphs", "同名モーフをベイク"),
             debugBakeMorphs);
+        targetUpperLimbInverseSolve = EditorGUILayout.Toggle(
+            new GUIContent(
+                L("目标上肢反解", "Target Upper-limb Inverse Solve", "対象上肢の逆解析"),
+                L("仅影响目标校准 Humanoid。启用后，上肢执行目标 FK 重建并由 HumanPose 反解；默认关闭。",
+                    "Only affects target-calibrated Humanoid. Reconstructs target upper-limb FK and extracts it through HumanPose; disabled by default.",
+                    "対象校正 Humanoid のみに適用します。対象上肢 FK を再構築して HumanPose から逆解析します。既定では無効です。")),
+            targetUpperLimbInverseSolve);
+        if (targetUpperLimbInverseSolve)
+        {
+            EditorGUILayout.HelpBox(
+                L("调试模式：特殊 Avatar 可能受益，但极端手臂/前臂扭转可能发生分支翻转或跳变。",
+                    "Debug mode: unusual Avatars may benefit, but extreme arm/forearm twist can flip branches or jump.",
+                    "デバッグモード：特殊な Avatar では改善する場合がありますが、極端な腕・前腕のツイストでは分岐反転やジャンプが発生する可能性があります。"),
+                MessageType.Warning);
+        }
         curveReductionError = EditorGUILayout.Slider(
             new GUIContent(
                 "Curve Error",
@@ -229,7 +244,8 @@ internal sealed class PmxSettingsPage : ConverterFeaturePage
                 PositionScale = debugPositionScale,
                 CoordinateConversion = debugCoordinateConversion,
                 BakeMorphs = debugBakeMorphs,
-                CurveReductionError = curveReductionError
+                CurveReductionError = curveReductionError,
+                TargetUpperLimbInverseSolve = targetUpperLimbInverseSolve
             };
 
             double lastProgressUpdate = double.NegativeInfinity;

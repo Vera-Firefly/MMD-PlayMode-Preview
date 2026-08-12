@@ -322,7 +322,8 @@ internal static class VmdMotionConverter
     }
 
     internal static PmxHumanoidAnimationClipBaker.BatchSession CreateManagedBatchSession(
-        string modelAssetPath, float curveReductionError, bool createHumanoidRig = true)
+        string modelAssetPath, float curveReductionError,
+        bool targetUpperLimbInverseSolve = false)
     {
         if (string.IsNullOrEmpty(modelAssetPath) ||
             !modelAssetPath.EndsWith(".pmx", StringComparison.OrdinalIgnoreCase))
@@ -330,8 +331,10 @@ internal static class VmdMotionConverter
         PmxModel model = PmxModelCache.Load(modelAssetPath);
         return new PmxHumanoidAnimationClipBaker.BatchSession(
             model,
-            CreateManagedBakeOptions(Mathf.Clamp(curveReductionError, 0f, 0.001f)),
-            createHumanoidRig);
+            CreateManagedBakeOptions(
+                Mathf.Clamp(curveReductionError, 0f, 0.001f),
+                targetUpperLimbInverseSolve),
+            true);
     }
 
     internal static List<GameObject> FindPipelineModels()
@@ -777,7 +780,8 @@ internal static class VmdMotionConverter
         return report.Clip;
     }
 
-    private static PmxAnimationClipBakerOptions CreateManagedBakeOptions(float curveReductionError)
+    private static PmxAnimationClipBakerOptions CreateManagedBakeOptions(
+        float curveReductionError, bool targetUpperLimbInverseSolve = false)
     {
         return new PmxAnimationClipBakerOptions
         {
@@ -785,7 +789,8 @@ internal static class VmdMotionConverter
             PositionScale = 0.08f,
             CoordinateConversion = PmxCoordinateConversion.RotateY180,
             BakeMorphs = false,
-            CurveReductionError = curveReductionError
+            CurveReductionError = curveReductionError,
+            TargetUpperLimbInverseSolve = targetUpperLimbInverseSolve
         };
     }
 

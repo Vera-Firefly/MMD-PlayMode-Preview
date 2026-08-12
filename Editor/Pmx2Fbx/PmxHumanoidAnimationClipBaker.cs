@@ -108,6 +108,9 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                 if (prepared == null) throw new ArgumentNullException(nameof(prepared));
                 if (targetRoot == null) throw new ArgumentNullException(nameof(targetRoot));
                 if (_disposed) throw new ObjectDisposedException(nameof(BatchSession));
+                if (_rig == null || _poseHandler == null)
+                    throw new InvalidOperationException(
+                        "Target-calibrated Humanoid output requires the canonical Humanoid source rig.");
                 int targetId = targetRoot.GetInstanceID();
                 if (_targetHumanoidRig == null || _targetHumanoidRootId != targetId)
                 {
@@ -120,7 +123,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                     _targetHumanoidRootId = targetId;
                 }
                 return PmxTargetHumanoidAnimationClipBaker.Bake(
-                    prepared, _options, _targetHumanoidRig, progress);
+                    prepared, _options, _targetHumanoidRig, _rig, _poseHandler, progress);
             }
 
             public void Dispose()
@@ -1252,14 +1255,22 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
 
     internal static class PmxTargetHumanoidAnimationClipBaker
     {
+        private static readonly bool[] CanonicalUpperLimbMuscles =
+            BuildCanonicalUpperLimbMuscleMask();
+
         internal static PmxAnimationBakeReport Bake(
             PmxHumanoidAnimationClipBaker.PreparedMotion prepared,
             PmxAnimationClipBakerOptions options,
             PmxTargetHumanoidSourceRig rig,
+            PmxHumanoidSourceRig canonicalRig,
+            HumanPoseHandler canonicalPoseHandler,
             Action<float, string> progress = null)
         {
             if (prepared == null) throw new ArgumentNullException(nameof(prepared));
             if (rig == null) throw new ArgumentNullException(nameof(rig));
+            if (canonicalRig == null) throw new ArgumentNullException(nameof(canonicalRig));
+            if (canonicalPoseHandler == null)
+                throw new ArgumentNullException(nameof(canonicalPoseHandler));
             options = options ?? new PmxAnimationClipBakerOptions();
             int sampleCount = prepared.Samples.Length;
             float[] sampleTimes = PmxHumanoidAnimationClipBaker.CreateSampleTimes(
@@ -1275,6 +1286,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             var rootQz = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator(sampleTimes);
             var rootQw = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator(sampleTimes);
             var humanPose = new HumanPose();
+            var canonicalPose = new HumanPose();
             Quaternion previousBodyRotation = Quaternion.identity;
             bool hasPreviousBodyRotation = false;
 
@@ -1283,6 +1295,12 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                 float vmdFrame = PmxHumanoidAnimationClipBaker.CalculateVmdFrame(
                     sample, sampleCount, options.SampleRate,
                     prepared.Motion.MaximumFrame);
+                if (!options.TargetUpperLimbInverseSolve)
+                {
+                    canonicalRig.Apply(prepared.Samples[sample], options.PositionScale);
+                    canonicalPoseHandler.GetHumanPose(ref canonicalPose);
+                    PmxHumanoidAnimationClipBaker.ValidateHumanPose(canonicalPose, vmdFrame);
+                }
                 rig.Apply(prepared.Samples[sample]);
                 rig.GetHumanPose(ref humanPose);
                 PmxHumanoidAnimationClipBaker.ValidateHumanPose(humanPose, vmdFrame);
@@ -1304,7 +1322,19 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                 rootQz.Add(bodyRotation.z);
                 rootQw.Add(bodyRotation.w);
                 for (int muscle = 0; muscle < muscles.Length; muscle++)
-                    muscles[muscle].Add(humanPose.muscles[muscle]);
+                {
+                    // Humanoid upper-limb muscles are already a canonical, avatar-independent
+                    // representation. Reconstructing target FK first and extracting the muscles
+                    // again changes the rotation basis on A-pose/non-MMD arm axes and can flip
+                    // arm/forearm twist to the opposite +/-2 branch. Keep the canonical PMX
+                    // Humanoid solution for the complete upper limb; target calibration remains
+                    // active for root, torso and legs where it corrects target proportions.
+                    float value = !options.TargetUpperLimbInverseSolve &&
+                                  CanonicalUpperLimbMuscles[muscle]
+                        ? canonicalPose.muscles[muscle]
+                        : humanPose.muscles[muscle];
+                    muscles[muscle].Add(value);
+                }
                 if ((sample & 15) == 0 || sample + 1 == sampleCount)
                     progress?.Invoke(0.8f * (sample + 1f) / Mathf.Max(1, sampleCount),
                         $"Calibrating Humanoid frame {sample + 1}/{sampleCount}");
@@ -1359,6 +1389,34 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             };
         }
 
+        private static bool[] BuildCanonicalUpperLimbMuscleMask()
+        {
+            var result = new bool[HumanTrait.MuscleCount];
+            for (int index = 0; index < result.Length; index++)
+            {
+                string name = HumanTrait.MuscleName[index];
+                if (string.IsNullOrEmpty(name)) continue;
+                result[index] = IsUpperLimbMuscle(name, "Left ") ||
+                                IsUpperLimbMuscle(name, "Right ");
+            }
+            return result;
+        }
+
+        private static bool IsUpperLimbMuscle(string name, string side)
+        {
+            if (!name.StartsWith(side, StringComparison.Ordinal)) return false;
+            string part = name.Substring(side.Length);
+            return part.StartsWith("Shoulder ", StringComparison.Ordinal) ||
+                   part.StartsWith("Arm ", StringComparison.Ordinal) ||
+                   part.StartsWith("Forearm ", StringComparison.Ordinal) ||
+                   part.StartsWith("Hand ", StringComparison.Ordinal) ||
+                   part.StartsWith("Thumb ", StringComparison.Ordinal) ||
+                   part.StartsWith("Index ", StringComparison.Ordinal) ||
+                   part.StartsWith("Middle ", StringComparison.Ordinal) ||
+                   part.StartsWith("Ring ", StringComparison.Ordinal) ||
+                   part.StartsWith("Little ", StringComparison.Ordinal);
+        }
+
         internal static PmxAnimationBakeReport BakeToAsset(string pmxPath, string vmdPath,
             GameObject targetRoot, string outputAssetPath,
             PmxAnimationClipBakerOptions options = null, Action<float, string> progress = null)
@@ -1369,7 +1427,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             PmxModel model = PmxModelCache.Load(pmxPath);
             VmdMotion motion = VmdParser.Parse(PmxAnimationClipBaker.ToPhysicalPath(vmdPath));
             PmxAnimationBakeReport report;
-            using (var session = new PmxHumanoidAnimationClipBaker.BatchSession(model, options, false))
+            using (var session = new PmxHumanoidAnimationClipBaker.BatchSession(model, options))
             {
                 PmxHumanoidAnimationClipBaker.PreparedMotion prepared = session.Prepare(motion);
                 report = session.BakeTargetHumanoid(prepared, targetRoot, progress);
