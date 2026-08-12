@@ -1,0 +1,13 @@
+{
+  "name": "com.vrchat.mmd-playmode-preview",
+  "displayName": "MMD Play Mode Preview",
+  "version": "2.5.8",
+  "unity": "2022.3",
+  "description": "Play Mode avatar preview with VMD camera conversion and managed PMX/VMD motion conversion, IK solving, Humanoid baking, and PMX parse caching.",
+  "author": {
+    "name": "VeraFirefly"
+  },
+  "dependencies": {
+    "vrchat.blackstartx.gesture-manager": "3.9.8"
+  }
+}

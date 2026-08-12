@@ -1,0 +1,674 @@
+using System.Collections.Generic;
+using UnityEngine;
+using AvatarDescriptor = VRC.SDKBase.VRC_AvatarDescriptor;
+
+public enum MmdPreviewDurationSource
+{
+    Animation,
+    AudioClip,
+    Camera
+}
+
+/// <summary>
+/// Attach this component to a scene GameObject, configure it in the Inspector, then
+/// enter Play Mode to preview an avatar animation, audio, background, and camera.
+/// </summary>
+[DisallowMultipleComponent]
+[DefaultExecutionOrder(32000)]
+public sealed class MmdPlayModePreview : MonoBehaviour
+{
+    [Header("Preview")]
+    public GameObject avatar;
+    public bool enablePreviewBackground;
+    public Texture2D backgroundImage;
+    public Color backgroundColor = new Color(0.11f, 0.12f, 0.14f);
+
+    public AnimationClip animationClip;
+    public AnimationClip cameraAnimationClip;
+    public AudioClip audioClip;
+    public bool loopPlayback = true;
+    public MmdPreviewDurationSource playbackDurationSource = MmdPreviewDurationSource.Animation;
+
+    [HideInInspector] public Component gestureManager;
+    [HideInInspector] public bool previewSessionAuthorized;
+    [HideInInspector] public bool gestureManagerAutoAdded;
+
+    public bool freeCameraControl;
+    public Vector3 cameraPosition = Vector3.zero;
+    public Vector3 cameraRotation = new Vector3(8f, -25f, 0f);
+    [Min(0.01f)] public float cameraMoveSpeed = 1f;
+
+    private Camera previewCamera;
+    private GameObject createdCameraObject;
+    private bool usesExistingCamera;
+    private Vector3 originalCameraPosition;
+    private Quaternion originalCameraRotation;
+    private float originalCameraFieldOfView;
+    private float originalCameraNearClipPlane;
+    private float originalCameraFarClipPlane;
+    private float originalCameraDepth;
+    private CameraClearFlags originalCameraClearFlags;
+    private Color originalCameraBackgroundColor;
+    private AudioSource previewAudio;
+    private GameObject backgroundPlane;
+    private Material backgroundMaterial;
+    private readonly List<GameObject> disabledAvatars = new List<GameObject>();
+    private Vector2 dragStart;
+    private int cameraDragButton = -1;
+    private float animationTime;
+    private bool playbackPlaying;
+    private bool playbackEnded;
+    private bool previewSessionActive;
+    private Vector3 cameraFocus;
+    private float cameraExtent = 1f;
+    private GameObject lockedAvatar;
+    private Texture2D appliedBackgroundImage;
+    private bool previewBackgroundApplied;
+    private bool previousCameraAnimationMode;
+    private Vector3 lastSynchronizedCameraPosition;
+    private Vector3 lastSynchronizedCameraRotation;
+    private readonly List<BlendShapeSnapshot> blendShapeSnapshots = new List<BlendShapeSnapshot>();
+    private bool blendShapeStateCaptured;
+    private bool playbackCameraStateCaptured;
+    private Vector3 playbackCameraPosition;
+    private Quaternion playbackCameraRotation;
+    private float playbackCameraFieldOfView;
+    private bool playbackCameraOrthographic;
+    private float playbackCameraOrthographicSize;
+
+    private sealed class BlendShapeSnapshot
+    {
+        public readonly SkinnedMeshRenderer renderer;
+        public readonly Mesh mesh;
+        public readonly float[] weights;
+
+        public BlendShapeSnapshot(SkinnedMeshRenderer renderer, Mesh mesh, float[] weights)
+        {
+            this.renderer = renderer;
+            this.mesh = mesh;
+            this.weights = weights;
+        }
+    }
+
+    private void Start()
+    {
+        previewSessionActive = previewSessionAuthorized;
+        if (!previewSessionActive) return;
+
+        lockedAvatar = avatar;
+        gestureManager = GetComponent("BlackStartX.GestureManager.GestureManager");
+        if (avatar == null)
+        {
+            Debug.LogError("MMD Play Mode Preview requires an Avatar.", this);
+            enabled = false;
+            return;
+        }
+
+        DisableUnselectedAvatars();
+
+        CreateCamera();
+        InitializeCameraFocus();
+        InitializeCameraSettings();
+        UpdatePreviewBackground();
+        previewAudio = gameObject.AddComponent<AudioSource>();
+        previewAudio.playOnAwake = false;
+        previewAudio.loop = loopPlayback;
+        previewAudio.clip = audioClip;
+        playbackPlaying = false;
+        playbackEnded = true;
+        freeCameraControl = true;
+        previousCameraAnimationMode = IsCameraAnimationMode;
+    }
+
+    private void Update()
+    {
+        if (!previewSessionActive) return;
+
+        // The selected avatar defines the active preview session and must not change mid-play.
+        if (avatar != lockedAvatar) avatar = lockedAvatar;
+        if (avatar == null || previewCamera == null) return;
+
+        UpdatePreviewBackground();
+
+        bool cameraAnimationMode = IsCameraAnimationMode;
+        if (cameraAnimationMode != previousCameraAnimationMode)
+        {
+            if (cameraAnimationMode)
+                SampleCameraAnimation(animationTime);
+            else
+                SynchronizeCameraSettingsFromTransform();
+            previousCameraAnimationMode = cameraAnimationMode;
+        }
+
+        if (cameraAnimationMode)
+        {
+            if (playbackEnded) SampleCameraAnimation(animationTime);
+        }
+        else
+        {
+            UpdateFreeCamera();
+        }
+        UpdateBackgroundPlane();
+    }
+
+    private void LateUpdate()
+    {
+        if (!previewSessionActive || avatar == null || playbackEnded || !HasPlaybackContent) return;
+
+        if (previewAudio != null) previewAudio.loop = loopPlayback;
+        if (playbackPlaying)
+        {
+            animationTime += Time.deltaTime;
+
+            float duration = PlaybackDuration;
+            if (duration > 0f && animationTime >= duration)
+            {
+                if (loopPlayback)
+                {
+                    animationTime %= duration;
+                    SyncAudio(true);
+                }
+                else
+                {
+                    animationTime = duration;
+                    SamplePreview(animationTime);
+                    UpdateBackgroundPlane();
+                    EndPreview();
+                    return;
+                }
+            }
+        }
+
+        SamplePreview(animationTime);
+        UpdateBackgroundPlane();
+    }
+
+    public bool IsPlaybackPlaying => playbackPlaying;
+
+    public bool IsPlaybackEnded => playbackEnded;
+
+    public bool IsPreviewSessionActive => previewSessionActive || previewSessionAuthorized;
+
+    public bool HasPlaybackContent => animationClip != null || cameraAnimationClip != null || audioClip != null;
+
+    public bool IsCameraAnimationMode => cameraAnimationClip != null && !freeCameraControl;
+
+    public void SetPreviewSessionActive(bool active)
+    {
+        if (!active) RestorePlaybackState();
+        previewSessionActive = active;
+    }
+
+    public float PlaybackTime => animationTime;
+
+    public float PlaybackDuration
+    {
+        get
+        {
+            switch (playbackDurationSource)
+            {
+                case MmdPreviewDurationSource.AudioClip:
+                    return audioClip != null ? audioClip.length : 0f;
+                case MmdPreviewDurationSource.Camera:
+                    return cameraAnimationClip != null ? cameraAnimationClip.length : 0f;
+                default:
+                    return animationClip != null ? animationClip.length : 0f;
+            }
+        }
+    }
+
+    public void PlayPreview()
+    {
+        if (!previewSessionActive || !HasPlaybackContent || PlaybackDuration <= 0f) return;
+        if (playbackEnded)
+        {
+            CapturePlaybackState();
+            playbackEnded = false;
+            animationTime = 0f;
+            if (cameraAnimationClip != null) freeCameraControl = false;
+            SamplePreview(0f);
+        }
+        if (!loopPlayback && animationTime >= PlaybackDuration) animationTime = 0f;
+        ApplyAudioClip();
+        playbackPlaying = true;
+        SyncAudio(true);
+    }
+
+    public void PausePreview()
+    {
+        if (!previewSessionActive) return;
+        playbackPlaying = false;
+        if (previewAudio != null) previewAudio.Pause();
+    }
+
+    public void ResetPreview()
+    {
+        if (!previewSessionActive) return;
+        CapturePlaybackState();
+        playbackPlaying = false;
+        playbackEnded = false;
+        animationTime = 0f;
+        if (cameraAnimationClip != null) freeCameraControl = false;
+        if (previewAudio != null)
+        {
+            previewAudio.Stop();
+            previewAudio.time = 0f;
+        }
+        SamplePreview(0f);
+        UpdateBackgroundPlane();
+    }
+
+    public void SeekPreview(float time)
+    {
+        if (!previewSessionActive) return;
+        CapturePlaybackState();
+        playbackEnded = false;
+        animationTime = Mathf.Clamp(time, 0f, PlaybackDuration);
+        SamplePreview(animationTime);
+        UpdateBackgroundPlane();
+        SyncAudio(playbackPlaying);
+    }
+
+    public void EndPreview()
+    {
+        if (!previewSessionActive) return;
+        playbackPlaying = false;
+        playbackEnded = true;
+        animationTime = 0f;
+        freeCameraControl = true;
+        cameraDragButton = -1;
+        if (previewAudio != null) previewAudio.Stop();
+        RestorePlaybackState();
+        if (previewCamera != null)
+        {
+            SynchronizeCameraSettingsFromTransform();
+            previousCameraAnimationMode = false;
+            UpdateBackgroundPlane();
+        }
+    }
+
+    private void SamplePreview(float time)
+    {
+        if (animationClip != null && avatar != null) animationClip.SampleAnimation(avatar, time);
+        if (IsCameraAnimationMode) SampleCameraAnimation(time);
+    }
+
+    private void SampleCameraAnimation(float time)
+    {
+        if (cameraAnimationClip == null || previewCamera == null) return;
+        cameraAnimationClip.SampleAnimation(previewCamera.gameObject, time);
+        SynchronizeCameraSettingsFromTransform();
+    }
+
+    private void SyncAudio(bool play)
+    {
+        if (previewAudio == null || previewAudio.clip == null) return;
+
+        previewAudio.loop = loopPlayback;
+        float audioLength = previewAudio.clip.length;
+        bool shouldPlay = play && (loopPlayback || animationTime < audioLength);
+        if (shouldPlay && !previewAudio.isPlaying) previewAudio.Play();
+
+        if (audioLength > 0f && previewAudio.clip.samples > 0)
+        {
+            float targetTime = loopPlayback ? animationTime % audioLength : Mathf.Min(animationTime, Mathf.Max(0f, audioLength - 0.001f));
+            int targetSample = Mathf.Clamp(Mathf.RoundToInt(targetTime * previewAudio.clip.frequency), 0, previewAudio.clip.samples - 1);
+            previewAudio.timeSamples = targetSample;
+        }
+
+        if (!shouldPlay) previewAudio.Pause();
+    }
+
+    private void ApplyAudioClip()
+    {
+        if (previewAudio == null || previewAudio.clip == audioClip) return;
+        previewAudio.Stop();
+        previewAudio.clip = audioClip;
+    }
+
+    private void CaptureBlendShapeState()
+    {
+        if (blendShapeStateCaptured || avatar == null) return;
+
+        blendShapeSnapshots.Clear();
+        foreach (SkinnedMeshRenderer renderer in avatar.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+        {
+            Mesh mesh = renderer.sharedMesh;
+            if (mesh == null || mesh.blendShapeCount == 0) continue;
+
+            var weights = new float[mesh.blendShapeCount];
+            for (int index = 0; index < weights.Length; index++)
+                weights[index] = renderer.GetBlendShapeWeight(index);
+            blendShapeSnapshots.Add(new BlendShapeSnapshot(renderer, mesh, weights));
+        }
+        blendShapeStateCaptured = true;
+    }
+
+    private void CapturePlaybackCameraState()
+    {
+        if (playbackCameraStateCaptured || previewCamera == null) return;
+
+        playbackCameraPosition = previewCamera.transform.position;
+        playbackCameraRotation = previewCamera.transform.rotation;
+        playbackCameraFieldOfView = previewCamera.fieldOfView;
+        playbackCameraOrthographic = previewCamera.orthographic;
+        playbackCameraOrthographicSize = previewCamera.orthographicSize;
+        playbackCameraStateCaptured = true;
+    }
+
+    private void CapturePlaybackState()
+    {
+        CaptureBlendShapeState();
+        CapturePlaybackCameraState();
+    }
+
+    private void RestoreBlendShapeState()
+    {
+        if (!blendShapeStateCaptured) return;
+
+        foreach (BlendShapeSnapshot snapshot in blendShapeSnapshots)
+        {
+            if (snapshot.renderer == null || snapshot.renderer.sharedMesh != snapshot.mesh) continue;
+
+            int count = Mathf.Min(snapshot.weights.Length, snapshot.mesh.blendShapeCount);
+            for (int index = 0; index < count; index++)
+                snapshot.renderer.SetBlendShapeWeight(index, snapshot.weights[index]);
+        }
+        blendShapeSnapshots.Clear();
+        blendShapeStateCaptured = false;
+    }
+
+    private void RestorePlaybackCameraState()
+    {
+        if (!playbackCameraStateCaptured) return;
+
+        if (previewCamera != null)
+        {
+            previewCamera.transform.position = playbackCameraPosition;
+            previewCamera.transform.rotation = playbackCameraRotation;
+            previewCamera.fieldOfView = playbackCameraFieldOfView;
+            previewCamera.orthographic = playbackCameraOrthographic;
+            previewCamera.orthographicSize = playbackCameraOrthographicSize;
+            SynchronizeCameraSettingsFromTransform();
+        }
+        playbackCameraStateCaptured = false;
+    }
+
+    private void RestorePlaybackState()
+    {
+        RestoreBlendShapeState();
+        RestorePlaybackCameraState();
+    }
+
+    private void OnDestroy()
+    {
+        RestorePlaybackState();
+        if (!previewSessionActive) return;
+
+        foreach (GameObject otherAvatar in disabledAvatars)
+        {
+            if (otherAvatar != null) otherAvatar.SetActive(true);
+        }
+        RestoreCamera();
+        DestroyBackgroundPlane();
+    }
+
+    private void DisableUnselectedAvatars()
+    {
+        foreach (AvatarDescriptor descriptor in Resources.FindObjectsOfTypeAll<AvatarDescriptor>())
+        {
+            if (descriptor == null || descriptor.gameObject == avatar || !descriptor.gameObject.activeInHierarchy || !descriptor.gameObject.scene.IsValid()) continue;
+            descriptor.gameObject.SetActive(false);
+            disabledAvatars.Add(descriptor.gameObject);
+        }
+    }
+
+    private void CreateCamera()
+    {
+        previewCamera = FindUsableCamera();
+        usesExistingCamera = previewCamera != null;
+        if (usesExistingCamera)
+        {
+            originalCameraPosition = previewCamera.transform.position;
+            originalCameraRotation = previewCamera.transform.rotation;
+            originalCameraFieldOfView = previewCamera.fieldOfView;
+            originalCameraNearClipPlane = previewCamera.nearClipPlane;
+            originalCameraFarClipPlane = previewCamera.farClipPlane;
+            originalCameraDepth = previewCamera.depth;
+            originalCameraClearFlags = previewCamera.clearFlags;
+            originalCameraBackgroundColor = previewCamera.backgroundColor;
+        }
+        else
+        {
+            createdCameraObject = new GameObject("MMD Preview Camera");
+            previewCamera = createdCameraObject.AddComponent<Camera>();
+            if (FindObjectOfType<AudioListener>() == null) createdCameraObject.AddComponent<AudioListener>();
+        }
+
+        if (!usesExistingCamera)
+        {
+            originalCameraClearFlags = previewCamera.clearFlags;
+            originalCameraBackgroundColor = previewCamera.backgroundColor;
+        }
+        previewCamera.fieldOfView = 30f;
+        previewCamera.nearClipPlane = 0.01f;
+        previewCamera.depth = 100f;
+    }
+
+    private Camera FindUsableCamera()
+    {
+        if (IsUsableCamera(Camera.main)) return Camera.main;
+        foreach (Camera camera in Resources.FindObjectsOfTypeAll<Camera>())
+        {
+            if (IsUsableCamera(camera)) return camera;
+        }
+        return null;
+    }
+
+    private bool IsUsableCamera(Camera camera)
+    {
+        return camera != null && camera.enabled && camera.gameObject.activeInHierarchy && camera.gameObject.scene.IsValid() &&
+               (avatar == null || !camera.transform.IsChildOf(avatar.transform));
+    }
+
+    private void RestoreCamera()
+    {
+        if (usesExistingCamera && previewCamera != null)
+        {
+            previewCamera.transform.position = originalCameraPosition;
+            previewCamera.transform.rotation = originalCameraRotation;
+            previewCamera.fieldOfView = originalCameraFieldOfView;
+            previewCamera.nearClipPlane = originalCameraNearClipPlane;
+            previewCamera.farClipPlane = originalCameraFarClipPlane;
+            previewCamera.depth = originalCameraDepth;
+            previewCamera.clearFlags = originalCameraClearFlags;
+            previewCamera.backgroundColor = originalCameraBackgroundColor;
+        }
+        else if (createdCameraObject != null)
+        {
+            Destroy(createdCameraObject);
+        }
+        previewCamera = null;
+        createdCameraObject = null;
+    }
+
+    private void CreateBackgroundPlane()
+    {
+        if (!enablePreviewBackground || backgroundImage == null) return;
+
+        backgroundPlane = GameObject.CreatePrimitive(PrimitiveType.Quad);
+        backgroundPlane.name = "MMD Preview Background";
+        Destroy(backgroundPlane.GetComponent<Collider>());
+        backgroundMaterial = new Material(Shader.Find("Unlit/Texture"));
+        backgroundMaterial.mainTexture = backgroundImage;
+        backgroundPlane.GetComponent<MeshRenderer>().sharedMaterial = backgroundMaterial;
+        appliedBackgroundImage = backgroundImage;
+    }
+
+    private void UpdateBackgroundImage()
+    {
+        if (backgroundImage == appliedBackgroundImage) return;
+        DestroyBackgroundPlane();
+        CreateBackgroundPlane();
+    }
+
+    private void UpdatePreviewBackground()
+    {
+        if (previewCamera == null) return;
+
+        if (!enablePreviewBackground)
+        {
+            if (previewBackgroundApplied)
+            {
+                previewCamera.clearFlags = originalCameraClearFlags;
+                previewCamera.backgroundColor = originalCameraBackgroundColor;
+                previewBackgroundApplied = false;
+            }
+            DestroyBackgroundPlane();
+            return;
+        }
+
+        previewCamera.clearFlags = CameraClearFlags.SolidColor;
+        previewCamera.backgroundColor = backgroundColor;
+        previewBackgroundApplied = true;
+        UpdateBackgroundImage();
+    }
+
+    private void DestroyBackgroundPlane()
+    {
+        if (backgroundPlane != null) Destroy(backgroundPlane);
+        if (backgroundMaterial != null) Destroy(backgroundMaterial);
+        backgroundPlane = null;
+        backgroundMaterial = null;
+        appliedBackgroundImage = null;
+    }
+
+    private void UpdateFreeCamera()
+    {
+        if (previewCamera == null) return;
+
+        // Inspector edits are applied back to the real camera before processing input.
+        if (!Approximately(cameraPosition, lastSynchronizedCameraPosition))
+            previewCamera.transform.position = cameraPosition;
+        if (!Approximately(cameraRotation, lastSynchronizedCameraRotation))
+            previewCamera.transform.rotation = Quaternion.Euler(cameraRotation);
+
+        if (!freeCameraControl)
+        {
+            cameraDragButton = -1;
+            previewCamera.farClipPlane = cameraExtent * 30f;
+            SynchronizeCameraSettingsFromTransform();
+            return;
+        }
+
+        if (Input.GetMouseButtonDown(1) || Input.GetMouseButtonDown(2))
+        {
+            cameraDragButton = Input.GetMouseButtonDown(1) ? 1 : 2;
+            dragStart = Input.mousePosition;
+        }
+
+        if (cameraDragButton >= 0 && Input.GetMouseButton(cameraDragButton))
+        {
+            Vector2 delta = (Vector2)Input.mousePosition - dragStart;
+            Vector3 euler = ToSignedEuler(previewCamera.transform.eulerAngles);
+            euler.x = Mathf.Clamp(euler.x - delta.y * 0.25f, -89.9f, 89.9f);
+            euler.y += delta.x * 0.25f;
+            previewCamera.transform.rotation = Quaternion.Euler(euler);
+            dragStart = Input.mousePosition;
+
+            float scroll = Input.mouseScrollDelta.y;
+            if (cameraDragButton == 1)
+            {
+                if (Mathf.Abs(scroll) > 0.001f)
+                    cameraMoveSpeed = Mathf.Clamp(cameraMoveSpeed * Mathf.Pow(1.25f, scroll), 0.01f, 100f);
+
+                Vector3 movement = Vector3.zero;
+                if (Input.GetKey(KeyCode.W)) movement += previewCamera.transform.forward;
+                if (Input.GetKey(KeyCode.S)) movement -= previewCamera.transform.forward;
+                if (Input.GetKey(KeyCode.D)) movement += previewCamera.transform.right;
+                if (Input.GetKey(KeyCode.A)) movement -= previewCamera.transform.right;
+                if (Input.GetKey(KeyCode.E)) movement += Vector3.up;
+                if (Input.GetKey(KeyCode.Q)) movement -= Vector3.up;
+                if (movement.sqrMagnitude > 0f)
+                    previewCamera.transform.position += movement.normalized * cameraMoveSpeed * Time.deltaTime;
+            }
+            else if (Mathf.Abs(scroll) > 0.001f)
+            {
+                previewCamera.transform.position +=
+                    previewCamera.transform.forward * scroll * cameraMoveSpeed * 0.25f;
+            }
+        }
+
+        if (cameraDragButton >= 0 && Input.GetMouseButtonUp(cameraDragButton))
+            cameraDragButton = -1;
+
+        previewCamera.farClipPlane = cameraExtent * 30f;
+        SynchronizeCameraSettingsFromTransform();
+    }
+
+    private void InitializeCameraFocus()
+    {
+        Bounds bounds = CalculateBounds(avatar);
+        cameraFocus = bounds.center;
+        cameraExtent = Mathf.Max(0.01f, Mathf.Max(bounds.extents.x, Mathf.Max(bounds.extents.y, bounds.extents.z)));
+    }
+
+    private void InitializeCameraSettings()
+    {
+        if (previewCamera == null) return;
+
+        Quaternion configuredRotation = Quaternion.Euler(cameraRotation);
+        if (cameraPosition == Vector3.zero)
+            cameraPosition = cameraFocus - configuredRotation * Vector3.forward * cameraExtent * 3.3f;
+
+        previewCamera.transform.position = cameraPosition;
+        previewCamera.transform.rotation = configuredRotation;
+        cameraMoveSpeed = Mathf.Max(0.01f, cameraMoveSpeed);
+        previewCamera.farClipPlane = cameraExtent * 30f;
+        SynchronizeCameraSettingsFromTransform();
+    }
+
+    private void SynchronizeCameraSettingsFromTransform()
+    {
+        if (previewCamera == null) return;
+        cameraPosition = previewCamera.transform.position;
+        cameraRotation = ToSignedEuler(previewCamera.transform.eulerAngles);
+        lastSynchronizedCameraPosition = cameraPosition;
+        lastSynchronizedCameraRotation = cameraRotation;
+    }
+
+    private static Vector3 ToSignedEuler(Vector3 euler)
+    {
+        return new Vector3(ToSignedAngle(euler.x), ToSignedAngle(euler.y), ToSignedAngle(euler.z));
+    }
+
+    private static float ToSignedAngle(float angle)
+    {
+        angle %= 360f;
+        return angle > 180f ? angle - 360f : angle;
+    }
+
+    private static bool Approximately(Vector3 left, Vector3 right)
+    {
+        return (left - right).sqrMagnitude < 0.00000001f;
+    }
+
+    private void UpdateBackgroundPlane()
+    {
+        if (backgroundPlane == null || previewCamera == null) return;
+        float distance = previewCamera.farClipPlane * 0.5f;
+        float height = 2f * distance * Mathf.Tan(previewCamera.fieldOfView * 0.5f * Mathf.Deg2Rad);
+        backgroundPlane.transform.position = previewCamera.transform.position + previewCamera.transform.forward * distance;
+        backgroundPlane.transform.rotation = previewCamera.transform.rotation;
+        backgroundPlane.transform.localScale = new Vector3(height * previewCamera.aspect, height, 1f);
+    }
+
+    private static Bounds CalculateBounds(GameObject root)
+    {
+        Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true);
+        if (renderers.Length == 0) return new Bounds(root.transform.position, Vector3.one);
+        Bounds result = renderers[0].bounds;
+        for (int index = 1; index < renderers.Length; index++) result.Encapsulate(renderers[index].bounds);
+        return result;
+    }
+}
