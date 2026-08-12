@@ -33,7 +33,6 @@ internal static class VmdMotionConverter
 
     internal sealed class ManagedPreparedConversion
     {
-        internal VmdMotion Motion;
         internal PmxHumanoidAnimationClipBaker.PreparedMotion HumanoidMotion;
         internal List<VmdMotionConversionData.MorphRecord> Morphs;
     }
@@ -60,7 +59,8 @@ internal static class VmdMotionConverter
     }
 
     internal static bool IsConvertedFor(
-        VmdMotionConversionData data, string vmdPath, VmdMotionConversionScheme scheme)
+        VmdMotionConversionData data, string vmdPath, VmdMotionConversionScheme scheme,
+        string expressionVmdPath = null)
     {
         if (data == null || !data.isConverted || scheme == VmdMotionConversionScheme.DirectExport ||
             data.conversionScheme != scheme)
@@ -73,12 +73,24 @@ internal static class VmdMotionConverter
         if (!string.IsNullOrEmpty(data.sourceVmdDependencyHash) &&
             !string.Equals(data.sourceVmdDependencyHash, hash, StringComparison.Ordinal))
             return false;
+        string expressionGuid = string.IsNullOrEmpty(expressionVmdPath)
+            ? string.Empty
+            : AssetDatabase.AssetPathToGUID(expressionVmdPath);
+        string expressionHash = string.IsNullOrEmpty(expressionVmdPath)
+            ? string.Empty
+            : GetDependencyHash(expressionVmdPath);
+        if (!string.Equals(data.sourceExpressionVmdGuid ?? string.Empty,
+                expressionGuid, StringComparison.Ordinal) ||
+            !string.Equals(data.sourceExpressionVmdDependencyHash ?? string.Empty,
+                expressionHash, StringComparison.Ordinal))
+            return false;
         if (scheme == VmdMotionConversionScheme.ExternalHumanoidClip && data.sourceClip == null)
             return false;
         return true;
     }
 
-    internal static VmdMotionConversionData CreateTransientData(string vmdPath)
+    internal static VmdMotionConversionData CreateTransientData(
+        string vmdPath, string expressionVmdPath = null)
     {
         ValidateAssetPath(vmdPath, ".vmd", "VMD");
         var data = ScriptableObject.CreateInstance<VmdMotionConversionData>();
@@ -87,7 +99,11 @@ internal static class VmdMotionConverter
         data.isConverted = false;
         data.conversionScheme = VmdMotionConversionScheme.DirectExport;
         SetSourceIdentity(data, vmdPath);
-        data.morphs = ReadMorphs(PmxAnimationClipBaker.ToPhysicalPath(vmdPath));
+        SetExpressionSourceIdentity(data, expressionVmdPath);
+        List<VmdMotionConversionData.MorphRecord> motionMorphs =
+            ReadMorphs(PmxAnimationClipBaker.ToPhysicalPath(vmdPath));
+        data.morphs = MergeExpressionMorphs(
+            motionMorphs, vmdPath, expressionVmdPath, int.MaxValue);
         return data;
     }
 
@@ -100,7 +116,8 @@ internal static class VmdMotionConverter
         VmdMotionConversionScheme conversionScheme,
         PmxHumanoidAnimationClipBaker.BatchSession batchSession = null,
         bool deferAssetImport = false,
-        string destinationFolder = null)
+        string destinationFolder = null,
+        string expressionVmdPath = null)
     {
         ValidateAssetPath(vmdPath, ".vmd", "VMD");
         if (!IsModelPath(modelPath, parserMethod))
@@ -125,11 +142,17 @@ internal static class VmdMotionConverter
             Mathf.Clamp(curveReductionError, 0f, 0.001f),
             batchSession,
             out VmdMotion parsedMotion);
-        List<VmdMotionConversionData.MorphRecord> morphs = parsedMotion != null
+        List<VmdMotionConversionData.MorphRecord> motionMorphs = parsedMotion != null
             ? BuildMorphRecords(parsedMotion)
             : ReadMorphs(Path.GetFullPath(vmdPath));
+        int maximumFrame = parsedMotion != null
+            ? checked((int)parsedMotion.MaximumFrame)
+            : Mathf.Max(0, Mathf.RoundToInt(sourceClip.length * VmdFrameRate));
+        List<VmdMotionConversionData.MorphRecord> morphs = MergeExpressionMorphs(
+            motionMorphs, vmdPath, expressionVmdPath, maximumFrame);
         return WriteConversionData(
-            vmdPath, dataPath, sourceClip, morphs, conversionScheme, deferAssetImport);
+            vmdPath, dataPath, sourceClip, morphs, conversionScheme, deferAssetImport,
+            expressionVmdPath);
     }
 
     internal static bool ConfirmManagedConversion(
@@ -152,6 +175,7 @@ internal static class VmdMotionConverter
 
     internal static ManagedPreparedConversion PrepareManagedConversion(
         string physicalVmdPath,
+        string physicalExpressionVmdPath,
         PmxHumanoidAnimationClipBaker.BatchSession batchSession,
         int maximumParallelism,
         Action<int, int> threadSafeProgress,
@@ -161,12 +185,20 @@ internal static class VmdMotionConverter
         cancellationToken.ThrowIfCancellationRequested();
         VmdMotion motion = VmdParser.Parse(physicalVmdPath);
         cancellationToken.ThrowIfCancellationRequested();
+        List<VmdMotionConversionData.MorphRecord> motionMorphs = BuildMorphRecords(motion);
+        string motionPath = Path.GetFullPath(physicalVmdPath);
+        string expressionPath = string.IsNullOrEmpty(physicalExpressionVmdPath)
+            ? null
+            : Path.GetFullPath(physicalExpressionVmdPath);
         return new ManagedPreparedConversion
         {
-            Motion = motion,
             HumanoidMotion = batchSession.Prepare(
                 motion, maximumParallelism, threadSafeProgress, cancellationToken),
-            Morphs = BuildMorphRecords(motion)
+            Morphs = MergeExpressionMorphs(
+                motionMorphs,
+                motionPath,
+                expressionPath,
+                checked((int)motion.MaximumFrame))
         };
     }
 
@@ -177,7 +209,8 @@ internal static class VmdMotionConverter
         VmdMotionConversionScheme conversionScheme,
         bool deferAssetImport,
         Action<float, string> progress,
-        string destinationFolder = null)
+        string destinationFolder = null,
+        string expressionVmdPath = null)
     {
         if (prepared == null) throw new ArgumentNullException(nameof(prepared));
         if (batchSession == null) throw new ArgumentNullException(nameof(batchSession));
@@ -189,7 +222,8 @@ internal static class VmdMotionConverter
             report.Clip,
             prepared.Morphs,
             conversionScheme,
-            deferAssetImport);
+            deferAssetImport,
+            expressionVmdPath);
     }
 
     internal static AnimationClip BakeManagedSourceClip(
@@ -203,8 +237,23 @@ internal static class VmdMotionConverter
         return report.Clip;
     }
 
+    internal static AnimationClip BakeManagedTargetHumanoidSourceClip(
+        ManagedPreparedConversion prepared,
+        PmxHumanoidAnimationClipBaker.BatchSession batchSession,
+        GameObject targetModel,
+        Action<float, string> progress)
+    {
+        if (prepared == null) throw new ArgumentNullException(nameof(prepared));
+        if (batchSession == null) throw new ArgumentNullException(nameof(batchSession));
+        if (targetModel == null) throw new ArgumentNullException(nameof(targetModel));
+        PmxAnimationBakeReport report = batchSession.BakeTargetHumanoid(
+            prepared.HumanoidMotion, targetModel, progress);
+        return report.Clip;
+    }
+
     internal static AnimationClip ConvertDirectSourceClip(
         string vmdPath,
+        string expressionVmdPath,
         string modelPath,
         ModelParserMethod parserMethod,
         float curveReductionError,
@@ -217,9 +266,14 @@ internal static class VmdMotionConverter
             Mathf.Clamp(curveReductionError, 0f, 0.001f),
             null,
             out VmdMotion parsedMotion);
-        morphs = parsedMotion != null
+        List<VmdMotionConversionData.MorphRecord> motionMorphs = parsedMotion != null
             ? BuildMorphRecords(parsedMotion)
             : ReadMorphs(PmxAnimationClipBaker.ToPhysicalPath(vmdPath));
+        int maximumFrame = parsedMotion != null
+            ? checked((int)parsedMotion.MaximumFrame)
+            : Mathf.Max(0, Mathf.RoundToInt(clip.length * VmdFrameRate));
+        morphs = MergeExpressionMorphs(
+            motionMorphs, vmdPath, expressionVmdPath, maximumFrame);
         return clip;
     }
 
@@ -229,7 +283,8 @@ internal static class VmdMotionConverter
         AnimationClip sourceClip,
         List<VmdMotionConversionData.MorphRecord> morphs,
         VmdMotionConversionScheme conversionScheme,
-        bool deferAssetImport)
+        bool deferAssetImport,
+        string expressionVmdPath = null)
     {
         ValidatePersistentScheme(conversionScheme);
         sourceClip.name = "Motion";
@@ -244,6 +299,7 @@ internal static class VmdMotionConverter
         data.conversionScheme = conversionScheme;
         data.morphs = morphs;
         SetSourceIdentity(data, vmdPath);
+        SetExpressionSourceIdentity(data, expressionVmdPath);
         if (conversionScheme == VmdMotionConversionScheme.ExternalHumanoidClip)
         {
             AssetDatabase.CreateAsset(sourceClip, externalClipPath);
@@ -266,7 +322,7 @@ internal static class VmdMotionConverter
     }
 
     internal static PmxHumanoidAnimationClipBaker.BatchSession CreateManagedBatchSession(
-        string modelAssetPath, float curveReductionError)
+        string modelAssetPath, float curveReductionError, bool createHumanoidRig = true)
     {
         if (string.IsNullOrEmpty(modelAssetPath) ||
             !modelAssetPath.EndsWith(".pmx", StringComparison.OrdinalIgnoreCase))
@@ -274,7 +330,8 @@ internal static class VmdMotionConverter
         PmxModel model = PmxModelCache.Load(modelAssetPath);
         return new PmxHumanoidAnimationClipBaker.BatchSession(
             model,
-            CreateManagedBakeOptions(Mathf.Clamp(curveReductionError, 0f, 0.001f)));
+            CreateManagedBakeOptions(Mathf.Clamp(curveReductionError, 0f, 0.001f)),
+            createHumanoidRig);
     }
 
     internal static List<GameObject> FindPipelineModels()
@@ -418,10 +475,22 @@ internal static class VmdMotionConverter
             return null;
 
         progress?.Invoke(0.02f, "Preparing animation export");
-        var clip = new AnimationClip();
-        EditorUtility.CopySerialized(sourceClip, clip);
+        bool reuseTransientSource = sourceClipOverride != null &&
+                                    !AssetDatabase.Contains(sourceClipOverride);
+        AnimationClip clip;
+        if (reuseTransientSource)
+        {
+            clip = sourceClipOverride;
+        }
+        else
+        {
+            clip = new AnimationClip();
+            EditorUtility.CopySerialized(sourceClip, clip);
+        }
         clip.name = Path.GetFileNameWithoutExtension(outputPath);
-        progress?.Invoke(0.12f, "Copying source animation");
+        progress?.Invoke(0.12f, reuseTransientSource
+            ? "Reusing transient source animation"
+            : "Copying source animation");
 
         AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
         settings.orientationOffsetY = data.poseRotationAngle;
@@ -524,9 +593,13 @@ internal static class VmdMotionConverter
     private static void UpgradeLegacyData(VmdMotionConversionData data, string vmdPath)
     {
         if (data.dataVersion >= VmdMotionConversionData.CurrentDataVersion) return;
+        bool predatesConversionSchemes = data.dataVersion < 2;
         data.dataVersion = VmdMotionConversionData.CurrentDataVersion;
-        data.isConverted = true;
-        data.conversionScheme = VmdMotionConversionScheme.EmbeddedHumanoidClip;
+        if (predatesConversionSchemes)
+        {
+            data.isConverted = true;
+            data.conversionScheme = VmdMotionConversionScheme.EmbeddedHumanoidClip;
+        }
         if (string.IsNullOrEmpty(data.sourceVmdGuid))
             data.sourceVmdGuid = AssetDatabase.AssetPathToGUID(vmdPath);
         EditorUtility.SetDirty(data);
@@ -536,6 +609,17 @@ internal static class VmdMotionConverter
     {
         data.sourceVmdGuid = AssetDatabase.AssetPathToGUID(vmdPath);
         data.sourceVmdDependencyHash = GetDependencyHash(vmdPath);
+    }
+
+    private static void SetExpressionSourceIdentity(
+        VmdMotionConversionData data, string expressionVmdPath)
+    {
+        data.sourceExpressionVmdGuid = string.IsNullOrEmpty(expressionVmdPath)
+            ? string.Empty
+            : AssetDatabase.AssetPathToGUID(expressionVmdPath);
+        data.sourceExpressionVmdDependencyHash = string.IsNullOrEmpty(expressionVmdPath)
+            ? string.Empty
+            : GetDependencyHash(expressionVmdPath);
     }
 
     private static string GetDependencyHash(string assetPath)
@@ -800,6 +884,52 @@ internal static class VmdMotionConverter
         foreach (VmdMotionConversionData.MorphRecord record in records.Values)
             record.frames.Sort((left, right) => left.frame.CompareTo(right.frame));
         return records.Values.OrderBy(record => record.name, StringComparer.Ordinal).ToList();
+    }
+
+    private static List<VmdMotionConversionData.MorphRecord> MergeExpressionMorphs(
+        List<VmdMotionConversionData.MorphRecord> motionMorphs,
+        string motionVmdPath,
+        string expressionVmdPath,
+        int maximumFrame)
+    {
+        if (string.IsNullOrEmpty(expressionVmdPath) || string.Equals(
+                Path.GetFullPath(motionVmdPath),
+                Path.GetFullPath(expressionVmdPath),
+                StringComparison.OrdinalIgnoreCase))
+            return motionMorphs;
+
+        List<VmdMotionConversionData.MorphRecord> expressionMorphs = ReadMorphs(
+            PmxAnimationClipBaker.ToPhysicalPath(expressionVmdPath));
+        var merged = new Dictionary<string, VmdMotionConversionData.MorphRecord>(
+            motionMorphs.Count + expressionMorphs.Count,
+            StringComparer.Ordinal);
+        foreach (VmdMotionConversionData.MorphRecord record in motionMorphs)
+            merged[record.name] = record;
+        foreach (VmdMotionConversionData.MorphRecord source in expressionMorphs)
+        {
+            if (source.frames.Count > 0 &&
+                source.frames[source.frames.Count - 1].frame <= maximumFrame)
+            {
+                merged[source.name] = source;
+                continue;
+            }
+            var replacement = new VmdMotionConversionData.MorphRecord { name = source.name };
+            for (int index = 0; index < source.frames.Count; index++)
+            {
+                VmdMotionConversionData.MorphFrame frame = source.frames[index];
+                if (frame.frame > maximumFrame) break;
+                replacement.frames.Add(new VmdMotionConversionData.MorphFrame
+                {
+                    frame = frame.frame,
+                    value = frame.value
+                });
+            }
+            if (replacement.frames.Count > 0)
+                merged[source.name] = replacement;
+            else
+                merged.Remove(source.name);
+        }
+        return merged.Values.OrderBy(record => record.name, StringComparer.Ordinal).ToList();
     }
 
     private static void ValidateAssetPath(string path, string extension, string label)

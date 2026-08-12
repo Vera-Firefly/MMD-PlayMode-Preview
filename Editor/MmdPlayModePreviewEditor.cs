@@ -155,7 +155,7 @@ public sealed class MmdPlayModePreviewEditor : Editor
 
         if (!Application.isPlaying && GUILayout.Button(
                 L("打开 VMD Converter", "Open VMD Converter", "VMD Converter を開く")))
-            VmdConverterWindow.OpenFor(preview);
+            MainConverterWindow.OpenFor(preview);
         EndColoredSection();
 
         BeginColoredSection("Camera", new Color(0.12f, 0.56f, 0.42f));

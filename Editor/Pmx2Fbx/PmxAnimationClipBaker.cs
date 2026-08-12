@@ -288,7 +288,6 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
         {
             if (keys == null || keys.Length == 0) return Array.Empty<Keyframe>();
             keys = ReduceLinearKeys(keys, reductionError);
-            var linearKeys = new Keyframe[keys.Length];
             for (int index = 0; index < keys.Length; index++)
             {
                 float inTangent = index > 0
@@ -303,9 +302,9 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                 key.inWeight = 0f;
                 key.outWeight = 0f;
                 key.weightedMode = WeightedMode.None;
-                linearKeys[index] = key;
+                keys[index] = key;
             }
-            return linearKeys;
+            return keys;
         }
 
         internal static Keyframe[] ReduceLinearKeys(Keyframe[] keys, float maximumError)

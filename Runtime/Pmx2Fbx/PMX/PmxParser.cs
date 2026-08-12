@@ -384,8 +384,8 @@ namespace VRChat.MmdPreview.Pmx2Fbx
             {
                 switch (size)
                 {
-                    case 1: return signed ? Reader.ReadSByte() : Reader.ReadByte();
-                    case 2: return signed ? Reader.ReadInt16() : Reader.ReadUInt16();
+                    case 1: return signed ? Reader.ReadSByte() : (int)Reader.ReadByte();
+                    case 2: return signed ? Reader.ReadInt16() : (int)Reader.ReadUInt16();
                     case 4: return Reader.ReadInt32();
                     default: throw new InvalidDataException($"Unsupported PMX index size {size}.");
                 }

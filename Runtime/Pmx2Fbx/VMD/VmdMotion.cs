@@ -236,7 +236,15 @@ namespace VRChat.MmdPreview.Pmx2Fbx
     {
         internal static void SortAndDeduplicate<T>(List<T> keys, Func<T, uint> getFrame)
         {
-            keys.Sort((left, right) => getFrame(left).CompareTo(getFrame(right)));
+            bool sorted = true;
+            for (int index = 1; index < keys.Count; index++)
+            {
+                if (getFrame(keys[index - 1]) <= getFrame(keys[index])) continue;
+                sorted = false;
+                break;
+            }
+            if (!sorted)
+                keys.Sort((left, right) => getFrame(left).CompareTo(getFrame(right)));
             for (int index = keys.Count - 1; index > 0; index--)
             {
                 if (getFrame(keys[index - 1]) == getFrame(keys[index]))

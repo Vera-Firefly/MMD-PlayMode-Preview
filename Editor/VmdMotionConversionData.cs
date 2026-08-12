@@ -11,7 +11,7 @@ public enum VmdMotionConversionScheme
 
 public sealed class VmdMotionConversionData : ScriptableObject
 {
-    public const int CurrentDataVersion = 2;
+    public const int CurrentDataVersion = 3;
 
     [Serializable]
     public sealed class MorphFrame
@@ -48,6 +48,8 @@ public sealed class VmdMotionConversionData : ScriptableObject
     public VmdMotionConversionScheme conversionScheme;
     public string sourceVmdGuid = string.Empty;
     public string sourceVmdDependencyHash = string.Empty;
+    public string sourceExpressionVmdGuid = string.Empty;
+    public string sourceExpressionVmdDependencyHash = string.Empty;
     public AnimationClip sourceClip;
     public float poseRotationAngle;
     public List<MorphRecord> morphs = new List<MorphRecord>();

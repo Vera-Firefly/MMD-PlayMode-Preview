@@ -38,6 +38,13 @@ namespace VRChat.MmdPreview.Pmx2Fbx
                 rotation = last.Rotation;
                 return;
             }
+            if (keys[rightIndex].Frame == frame)
+            {
+                VmdBoneKeyframe exact = keys[rightIndex];
+                translation = exact.Translation;
+                rotation = exact.Rotation;
+                return;
+            }
 
             VmdBoneKeyframe left = keys[rightIndex - 1];
             VmdBoneKeyframe right = keys[rightIndex];
@@ -62,6 +69,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx
             int rightIndex = FindRightKey(keys, frame);
             if (rightIndex <= 0) return keys[0].Weight;
             if (rightIndex >= keys.Count) return keys[keys.Count - 1].Weight;
+            if (keys[rightIndex].Frame == frame) return keys[rightIndex].Weight;
             VmdMorphKeyframe left = keys[rightIndex - 1];
             VmdMorphKeyframe right = keys[rightIndex];
             float duration = right.Frame - left.Frame;

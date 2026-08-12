@@ -6,15 +6,18 @@ using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
+using VRChat.MmdPreview.Pmx2Fbx;
 using VRChat.MmdPreview.Pmx2Fbx.Editor;
 
-public sealed class VmdConverterWindow : EditorWindow
+public sealed class MainConverterWindow : EditorWindow
 {
     private sealed class ManagedPreparationJob
     {
         internal int Ordinal;
         internal string AssetPath;
         internal string PhysicalPath;
+        internal string ExpressionAssetPath;
+        internal string ExpressionPhysicalPath;
         internal volatile int CompletedSamples;
         internal volatile int TotalSamples;
         internal Task<VmdMotionConverter.ManagedPreparedConversion> Work;
@@ -29,8 +32,28 @@ public sealed class VmdConverterWindow : EditorWindow
     private const string DefaultMotionStorageFolder =
         "Assets/VeraFirefly/MMD Play Mode Converter OutPut";
     private static readonly Quaternion MmdToUnityRotation = Quaternion.Euler(0f, 180f, 0f);
+    private static readonly Color[] DarkMotionEntryColors =
+    {
+        new Color(0.38f, 0.78f, 1f),
+        new Color(1f, 0.62f, 0.38f),
+        new Color(0.55f, 0.88f, 0.48f),
+        new Color(0.85f, 0.58f, 1f),
+        new Color(1f, 0.78f, 0.30f),
+        new Color(0.40f, 0.88f, 0.82f)
+    };
+    private static readonly Color[] LightMotionEntryColors =
+    {
+        new Color(0.05f, 0.42f, 0.72f),
+        new Color(0.72f, 0.25f, 0.05f),
+        new Color(0.16f, 0.52f, 0.12f),
+        new Color(0.52f, 0.20f, 0.68f),
+        new Color(0.65f, 0.42f, 0.02f),
+        new Color(0.02f, 0.48f, 0.43f)
+    };
 
     [SerializeField] private List<DefaultAsset> motionVmdAssets = new List<DefaultAsset>();
+    [SerializeField] private List<DefaultAsset> motionExpressionVmdAssets = new List<DefaultAsset>();
+    [SerializeField] private List<bool> motionVmdFileFoldouts = new List<bool>();
     [SerializeField] private Vector2 motionVmdListScroll;
     [SerializeField] private Vector2 motionPageScroll;
     [SerializeField] private DefaultAsset motionModelAsset;
@@ -49,6 +72,17 @@ public sealed class VmdConverterWindow : EditorWindow
     [SerializeField] private Vector2 cameraPageScroll;
     [SerializeField] private MotionStorageLocation cameraOutputStorageLocation;
     [SerializeField] private string customCameraOutputStorageFolder = DefaultMotionStorageFolder;
+    [SerializeField] private List<DefaultAsset> vpdAssets = new List<DefaultAsset>();
+    [SerializeField] private List<bool> vpdFileFoldouts = new List<bool>();
+    [SerializeField] private Vector2 vpdListScroll;
+    [SerializeField] private Vector2 vpdPageScroll;
+    [SerializeField] private bool vpdConversionSettingsExpanded = true;
+    [SerializeField] private bool vpdRetargetModel;
+    [SerializeField] private DefaultAsset vpdModelAsset;
+    [SerializeField] private GameObject vpdTargetAvatar;
+    [SerializeField] private MotionOutputType vpdOutputType;
+    [SerializeField] private MotionStorageLocation vpdOutputStorageLocation;
+    [SerializeField] private string customVpdOutputStorageFolder = DefaultMotionStorageFolder;
     [SerializeField] private MmdPlayModePreview targetPreview;
     [SerializeField] private float unitScale = 0.08f;
     [SerializeField] private int selectedTab;
@@ -65,6 +99,9 @@ public sealed class VmdConverterWindow : EditorWindow
         PmxCoordinateConversion.RotateY180;
     [SerializeField] private bool debugBakeMorphs = true;
     [SerializeField] private float curveReductionError = 0.0001f;
+    [SerializeField] private MotionOutputType motionOutputType;
+    [SerializeField] private float fkRotationErrorDegrees = 0.01f;
+    [SerializeField] private float fkPositionError = 0.00005f;
 
     private readonly List<GameObject> pipelineModels = new List<GameObject>();
     [NonSerialized] private List<ConvertedMotionEntry> convertedMotionEntries;
@@ -78,6 +115,11 @@ public sealed class VmdConverterWindow : EditorWindow
     [NonSerialized] private Dictionary<string, VmdMotionConverter.BlendShapeTarget> cachedSameNameTargets;
     [NonSerialized] private Dictionary<string, VmdMotionConversionData> transientMotionData;
     [NonSerialized] private EditorLanguage cachedMappingLanguage;
+    [NonSerialized] private ConverterWindowContext windowContext;
+    [NonSerialized] private VmdConverterPage vmdConverterPage;
+    [NonSerialized] private VmdCameraPage vmdCameraPage;
+    [NonSerialized] private VpdConversionPage vpdConversionPage;
+    [NonSerialized] private PmxSettingsPage pmxSettingsPage;
 
     private enum EditorLanguage
     {
@@ -89,8 +131,19 @@ public sealed class VmdConverterWindow : EditorWindow
     private enum BuiltInDebugOutput
     {
         Humanoid,
-        GenericTransform
+        GenericTransform,
+        TargetModelFkFidelity,
+        TargetCalibratedHumanoid
     }
+
+    private enum MotionOutputType
+    {
+        Humanoid,
+        TargetCalibratedHumanoid
+    }
+
+    private bool IsTargetCalibratedHumanoid =>
+        motionOutputType == MotionOutputType.TargetCalibratedHumanoid;
 
     private enum MotionStorageLocation
     {
@@ -110,13 +163,13 @@ public sealed class VmdConverterWindow : EditorWindow
     [MenuItem(MenuPath)]
     private static void Open()
     {
-        VmdConverterWindow window = GetWindow<VmdConverterWindow>("VMD Converter");
+        MainConverterWindow window = GetWindow<MainConverterWindow>("VMD Converter");
         window.Show();
     }
 
     internal static void OpenFor(MmdPlayModePreview preview)
     {
-        VmdConverterWindow window = GetWindow<VmdConverterWindow>("VMD Converter");
+        MainConverterWindow window = GetWindow<MainConverterWindow>("VMD Converter");
         window.targetPreview = preview;
         window.selectedTab = 1;
         window.Show();
@@ -125,6 +178,7 @@ public sealed class VmdConverterWindow : EditorWindow
 
     private void OnEnable()
     {
+        EnsureFeaturePages();
         titleContent = new GUIContent("VMD Converter", AssetDatabase.LoadAssetAtPath<Texture2D>(IconPath));
         minSize = new Vector2(430f, 420f);
         EnsureVmdLists();
@@ -132,6 +186,9 @@ public sealed class VmdConverterWindow : EditorWindow
             motionConversionScheme != VmdMotionConversionScheme.DirectExport &&
             motionConversionScheme != VmdMotionConversionScheme.ExternalHumanoidClip)
             motionConversionScheme = VmdMotionConversionScheme.ExternalHumanoidClip;
+        if (motionOutputType != MotionOutputType.Humanoid &&
+            motionOutputType != MotionOutputType.TargetCalibratedHumanoid)
+            motionOutputType = MotionOutputType.Humanoid;
         convertedMotionResourcesDirty = true;
         ScanPipelineModels();
         NormalizeModelParser();
@@ -141,13 +198,17 @@ public sealed class VmdConverterWindow : EditorWindow
         {
             if (selectedTab == 0)
             {
-                AddVmdAsset(motionVmdAssets, selected);
+                AddMotionVmdAsset(selected);
                 convertedMotionResourcesDirty = true;
             }
             else if (selectedTab == 1)
             {
                 AddVmdAsset(cameraVmdAssets, selected);
             }
+        }
+        else if (IsVpdAsset(selected) && selectedTab == 2)
+        {
+            AddVpdAsset(vpdAssets, selected);
         }
     }
 
@@ -172,6 +233,7 @@ public sealed class VmdConverterWindow : EditorWindow
 
     private void OnGUI()
     {
+        EnsureFeaturePages();
         DrawHeader();
         selectedTab = GUILayout.Toolbar(
             selectedTab,
@@ -179,6 +241,7 @@ public sealed class VmdConverterWindow : EditorWindow
             {
                 L("VMD动作转换", "VMD Motion", "VMDモーション変換"),
                 L("VMD镜头转换", "VMD Camera", "VMDカメラ変換"),
+                L("VPD转换", "VPD Conversion", "VPD変換"),
                 L("PMX转换设置", "PMX Settings", "PMX変換設定")
             });
         EditorGUILayout.Space(8f);
@@ -188,27 +251,50 @@ public sealed class VmdConverterWindow : EditorWindow
             if (selectedTab == 0)
             {
                 motionPageScroll = EditorGUILayout.BeginScrollView(motionPageScroll);
-                DrawMotionConverter();
+                vmdConverterPage.Draw(windowContext);
                 EditorGUILayout.EndScrollView();
             }
             else if (selectedTab == 1)
             {
                 cameraPageScroll = EditorGUILayout.BeginScrollView(cameraPageScroll);
-                DrawCameraConverter();
+                vmdCameraPage.Draw(windowContext);
+                EditorGUILayout.EndScrollView();
+            }
+            else if (selectedTab == 2)
+            {
+                vpdPageScroll = EditorGUILayout.BeginScrollView(vpdPageScroll);
+                vpdConversionPage.Draw(windowContext);
                 EditorGUILayout.EndScrollView();
             }
             else
             {
                 pmxPageScroll = EditorGUILayout.BeginScrollView(pmxPageScroll);
-                DrawPmxSettings();
+                pmxSettingsPage.Draw(windowContext);
                 EditorGUILayout.EndScrollView();
             }
         }
 
-        if (selectedTab != 2)
-            DrawBottomAction();
+        if (selectedTab == 0) vmdConverterPage.DrawAction(windowContext);
+        else if (selectedTab == 1) vmdCameraPage.DrawAction(windowContext);
+        else if (selectedTab == 2) vpdConversionPage.DrawAction(windowContext);
         EditorGUILayout.Space(4f);
     }
+
+    private void EnsureFeaturePages()
+    {
+        if (windowContext == null) windowContext = new ConverterWindowContext();
+        windowContext.Attach(this);
+        if (vmdConverterPage == null) vmdConverterPage = new VmdConverterPage();
+        if (vmdCameraPage == null) vmdCameraPage = new VmdCameraPage();
+        if (vpdConversionPage == null) vpdConversionPage = new VpdConversionPage();
+        if (pmxSettingsPage == null) pmxSettingsPage = new PmxSettingsPage();
+    }
+
+    internal void DrawVmdConverterPage() => DrawMotionConverter();
+    internal void DrawVmdCameraPage() => DrawCameraConverter();
+    internal void DrawVpdConversionPage() => DrawVpdConverter();
+    internal void DrawPmxSettingsPage() => DrawPmxSettings();
+    internal void DrawCurrentPageAction() => DrawBottomAction();
 
     private void DrawHeader()
     {
@@ -226,10 +312,10 @@ public sealed class VmdConverterWindow : EditorWindow
             GUILayout.FlexibleSpace();
         }
 
-        DrawCenteredLabel(
+        ConverterWindowGui.DrawCenteredLabel(
             L("版本号: ", "Version: ", "バージョン: ") + GetPackageVersion(),
             EditorStyles.centeredGreyMiniLabel);
-        DrawCenteredLabel(
+        ConverterWindowGui.DrawCenteredLabel(
             L("作者: ", "Author: ", "作者: ") + AuthorName,
             EditorStyles.centeredGreyMiniLabel);
 
@@ -248,9 +334,9 @@ public sealed class VmdConverterWindow : EditorWindow
 
     private void DrawMotionConverter()
     {
-        DrawSectionTitle(L("MMD动作转换", "MMD Motion Conversion", "MMDモーション変換"));
+        ConverterWindowGui.DrawSectionTitle(L("MMD动作转换", "MMD Motion Conversion", "MMDモーション変換"));
 
-        if (DrawVmdFileList(motionVmdAssets, ref motionVmdListScroll))
+        if (DrawMotionVmdFileList())
             convertedMotionResourcesDirty = true;
 
         DrawMotionConversionSettings();
@@ -259,47 +345,39 @@ public sealed class VmdConverterWindow : EditorWindow
         if (convertedMotionEntries.Count == 0) return;
 
         EditorGUILayout.Space(8f);
-        DrawSectionTitle(L("模型形态键映射", "Model BlendShape Mapping", "モデルモーフマッピング"));
+        ConverterWindowGui.DrawSectionTitle(L("模型形态键映射", "Model BlendShape Mapping", "モデルモーフマッピング"));
         DrawModelMappings();
     }
 
     private void DrawMotionConversionSettings()
     {
-        motionConversionSettingsExpanded = EditorGUILayout.Foldout(
-            motionConversionSettingsExpanded,
-            L("转换设置", "Conversion Settings", "変換設定"),
-            true);
-        if (!motionConversionSettingsExpanded) return;
-
-        DrawOutlinedSetting(DrawMotionConversionScheme);
-        DrawOutlinedSetting(() => DrawStorageLocationSetting(
-            L("Asset存储位置", "Asset Storage Location", "Asset保存場所"),
-            ref motionAssetStorageLocation,
-            ref customMotionAssetStorageFolder,
-            L("Asset存储位置", "Asset Storage Location", "Asset保存場所")));
-        DrawOutlinedSetting(() => DrawStorageLocationSetting(
-            L("输出位置", "Output Location", "出力場所"),
-            ref motionOutputStorageLocation,
-            ref customMotionOutputStorageFolder,
-            L("输出存储位置", "Output Storage Location", "出力保存場所")));
-        DrawOutlinedSetting(DrawMotionConversionModelSettings);
-        EditorGUILayout.Space(4f);
-    }
-
-    private static void DrawOutlinedSetting(Action draw)
-    {
-        Rect border = EditorGUILayout.BeginVertical();
-        GUILayout.Space(5f);
-        using (new EditorGUILayout.HorizontalScope())
+        ConverterWindowGui.DrawOutlinedSetting(() =>
         {
-            GUILayout.Space(7f);
-            using (new EditorGUILayout.VerticalScope()) draw();
-            GUILayout.Space(7f);
-        }
-        GUILayout.Space(5f);
-        EditorGUILayout.EndVertical();
-        DrawOutline(border);
-        EditorGUILayout.Space(4f);
+            motionConversionSettingsExpanded = EditorGUILayout.Foldout(
+                motionConversionSettingsExpanded,
+                L("转换设置", "Conversion Settings", "変換設定"),
+                true);
+            if (!motionConversionSettingsExpanded) return;
+
+            EditorGUILayout.Space(5f);
+            DrawMotionOutputTypeSettings();
+            EditorGUILayout.Space(5f);
+            DrawMotionConversionScheme();
+            EditorGUILayout.Space(5f);
+            DrawStorageLocationSetting(
+                L("Asset存储位置", "Asset Storage Location", "Asset保存場所"),
+                ref motionAssetStorageLocation,
+                ref customMotionAssetStorageFolder,
+                L("Asset存储位置", "Asset Storage Location", "Asset保存場所"));
+            EditorGUILayout.Space(5f);
+            DrawStorageLocationSetting(
+                L("输出位置", "Output Location", "出力場所"),
+                ref motionOutputStorageLocation,
+                ref customMotionOutputStorageFolder,
+                L("输出存储位置", "Output Storage Location", "出力保存場所"));
+            EditorGUILayout.Space(5f);
+            DrawMotionConversionModelSettings();
+        });
     }
 
     private void DrawStorageLocationSetting(
@@ -310,7 +388,7 @@ public sealed class VmdConverterWindow : EditorWindow
     {
         string[] labels =
         {
-            L("跟随文件: VMD所在位置", "Follow File: VMD Location", "ファイルに従う: VMDの場所"),
+            L("跟随文件: 文件所在位置", "Follow File: File Location", "ファイルに従う: ファイルの場所"),
             L("默认: " + EscapePopupPath(DefaultMotionStorageFolder + "/"),
                 "Default: " + EscapePopupPath(DefaultMotionStorageFolder + "/"),
                 "既定: " + EscapePopupPath(DefaultMotionStorageFolder + "/")),
@@ -364,6 +442,9 @@ public sealed class VmdConverterWindow : EditorWindow
 
     private void DrawMotionConversionScheme()
     {
+        if (IsTargetCalibratedHumanoid &&
+            motionConversionScheme != VmdMotionConversionScheme.DirectExport)
+            motionConversionScheme = VmdMotionConversionScheme.DirectExport;
         VmdMotionConversionScheme[] values =
         {
             VmdMotionConversionScheme.EmbeddedHumanoidClip,
@@ -384,11 +465,44 @@ public sealed class VmdConverterWindow : EditorWindow
         };
         int current = Array.IndexOf(values, motionConversionScheme);
         if (current < 0) current = 2;
-        int next = EditorGUILayout.Popup(L("转换方案", "Conversion Scheme", "変換方式"), current, labels);
+        int next;
+        using (new EditorGUI.DisabledScope(IsTargetCalibratedHumanoid))
+            next = EditorGUILayout.Popup(L("转换方案", "Conversion Scheme", "変換方式"), current, labels);
         if (next == current) return;
         motionConversionScheme = values[next];
         DestroyTransientMotionData();
         convertedMotionResourcesDirty = true;
+    }
+
+    private void DrawMotionOutputTypeSettings()
+    {
+        EditorGUI.BeginChangeCheck();
+        MotionOutputType next = (MotionOutputType)EditorGUILayout.Popup(
+            L("输出类型", "Output Type", "出力タイプ"),
+            (int)motionOutputType,
+            new[]
+            {
+                "Humanoid",
+                L("目标校准 Humanoid", "Target-calibrated Humanoid", "対象校正Humanoid")
+            });
+        if (EditorGUI.EndChangeCheck())
+        {
+            motionOutputType = next;
+            DestroyTransientMotionData();
+            convertedMotionResourcesDirty = true;
+            if (IsTargetCalibratedHumanoid)
+            {
+                motionConversionScheme = VmdMotionConversionScheme.DirectExport;
+                modelParserMethod = VmdMotionConverter.ModelParserMethod.BuiltInManaged;
+            }
+        }
+        if (!IsTargetCalibratedHumanoid) return;
+
+        EditorGUILayout.HelpBox(
+            L("在目标Avatar骨架上校准后输出标准HumanoidRoot/Muscle曲线, 该方案会额外经过目标 Avatar 的 HumanPoseHandler 校准, 因此转换通常更慢",
+                "Outputs standard Humanoid Root/Muscle curves after calibration on the target Avatar skeleton. This adds a target Avatar HumanPoseHandler calibration pass, so conversion is usually slower.",
+                "対象Avatar骨格で校正後、標準Humanoid Root/Muscleカーブを出力します。対象AvatarのHumanPoseHandler校正処理が追加されるため、通常は変換が遅くなります。"),
+            MessageType.Info);
     }
 
     private void DrawMotionConversionModelSettings()
@@ -588,17 +702,17 @@ public sealed class VmdConverterWindow : EditorWindow
         }
         EditorGUILayout.Space(4f);
         EditorGUILayout.EndVertical();
-        DrawOutline(mappingBorder);
+        ConverterWindowGui.DrawOutline(mappingBorder);
         EditorGUILayout.Space(6f);
         return mappingCreated && !entry.IsTransient;
     }
 
     private void DrawCameraConverter()
     {
-        DrawSectionTitle(L("MMD镜头转换", "MMD Camera Conversion", "MMDカメラ変換"));
+        ConverterWindowGui.DrawSectionTitle(L("MMD镜头转换", "MMD Camera Conversion", "MMDカメラ変換"));
         DrawVmdFileList(cameraVmdAssets, ref cameraVmdListScroll);
 
-        DrawOutlinedSetting(() => DrawStorageLocationSetting(
+        ConverterWindowGui.DrawOutlinedSetting(() => DrawStorageLocationSetting(
             L("输出位置", "Output Location", "出力場所"),
             ref cameraOutputStorageLocation,
             ref customCameraOutputStorageFolder,
@@ -717,19 +831,423 @@ public sealed class VmdConverterWindow : EditorWindow
         return changed;
     }
 
+    private bool DrawMotionVmdFileList()
+    {
+        EnsureMotionVmdEntryState();
+        bool changed = false;
+        if (motionVmdAssets.Count > 0)
+        {
+            const float maxListHeight = 220f;
+            float rowHeight = EditorGUIUtility.singleLineHeight +
+                              EditorGUIUtility.standardVerticalSpacing;
+            float contentHeight = 0f;
+            for (int index = 0; index < motionVmdAssets.Count; index++)
+                contentHeight += rowHeight * (motionVmdFileFoldouts[index] ? 3f : 1f) +
+                                 (index > 0 ? 5f : 0f);
+            bool useScrollView = contentHeight > maxListHeight;
+            if (useScrollView)
+            {
+                motionVmdListScroll = EditorGUILayout.BeginScrollView(
+                    motionVmdListScroll,
+                    false,
+                    false,
+                    GUILayout.Height(maxListHeight));
+            }
+
+            for (int index = 0; index < motionVmdAssets.Count; index++)
+            {
+                if (index > 0) ConverterWindowGui.DrawEntrySeparator();
+                DefaultAsset displayAsset = motionVmdAssets[index] != null
+                    ? motionVmdAssets[index]
+                    : motionExpressionVmdAssets[index];
+                Color entryColor = GetMotionEntryColor(index);
+                bool removeEntry = false;
+                Color previousContentColor = GUI.contentColor;
+                GUI.contentColor = entryColor;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    string arrow = motionVmdFileFoldouts[index] ? "▼ " : "▶ ";
+                    if (GUILayout.Button(
+                            arrow + GetVmdDisplayName(displayAsset),
+                            EditorStyles.boldLabel,
+                            GUILayout.ExpandWidth(true)))
+                        motionVmdFileFoldouts[index] = !motionVmdFileFoldouts[index];
+                    removeEntry = GUILayout.Button(
+                        "×", EditorStyles.miniButton, GUILayout.Width(24f));
+                }
+                GUI.contentColor = previousContentColor;
+                if (removeEntry)
+                {
+                    motionVmdAssets.RemoveAt(index);
+                    motionExpressionVmdAssets.RemoveAt(index);
+                    motionVmdFileFoldouts.RemoveAt(index);
+                    changed = true;
+                    break;
+                }
+                if (!motionVmdFileFoldouts[index]) continue;
+
+                EditorGUI.indentLevel++;
+                if (DrawMotionVmdDataRow(
+                        L("动作数据", "Motion Data", "モーションデータ"),
+                        motionVmdAssets[index],
+                        out DefaultAsset nextMotion))
+                {
+                    string nextPath = GetVmdAssetPath(nextMotion);
+                    bool duplicate = !string.IsNullOrEmpty(nextPath) && motionVmdAssets
+                        .Where((_, otherIndex) => otherIndex != index)
+                        .Any(other => string.Equals(
+                            GetVmdAssetPath(other),
+                            nextPath,
+                            StringComparison.OrdinalIgnoreCase));
+                    if (duplicate)
+                    {
+                        ShowDialog(
+                            L("VMD文件", "VMD Files", "VMDファイル"),
+                            L("该动作VMD已在列表中。",
+                                "That motion VMD is already in the list.",
+                                "そのモーションVMDはすでにリストにあります。"));
+                    }
+                    else
+                    {
+                        motionVmdAssets[index] = nextMotion;
+                        changed = true;
+                    }
+                }
+
+                if (DrawMotionVmdDataRow(
+                        L("表情数据", "Expression Data", "表情データ"),
+                        motionExpressionVmdAssets[index],
+                        out DefaultAsset nextExpression))
+                {
+                    motionExpressionVmdAssets[index] = nextExpression;
+                    changed = true;
+                }
+                EditorGUI.indentLevel--;
+
+                if (motionVmdAssets[index] != null || motionExpressionVmdAssets[index] != null)
+                    continue;
+                motionVmdAssets.RemoveAt(index);
+                motionExpressionVmdAssets.RemoveAt(index);
+                motionVmdFileFoldouts.RemoveAt(index);
+                changed = true;
+                break;
+            }
+
+            if (useScrollView)
+                EditorGUILayout.EndScrollView();
+        }
+
+        Rect dropRect = GUILayoutUtility.GetRect(0f, 42f, GUILayout.ExpandWidth(true));
+        var dropStyle = new GUIStyle(GUI.skin.box) { alignment = TextAnchor.MiddleCenter };
+        GUI.Box(
+            dropRect,
+            L("拖入一个或多个VMD文件", "Drop one or more VMD files", "1つ以上のVMDファイルをドロップ"),
+            dropStyle);
+        Event currentEvent = Event.current;
+        if (dropRect.Contains(currentEvent.mousePosition) &&
+            (currentEvent.type == EventType.DragUpdated || currentEvent.type == EventType.DragPerform))
+        {
+            bool hasVmd = DragAndDrop.objectReferences
+                .OfType<DefaultAsset>()
+                .Any(IsVmdAsset);
+            DragAndDrop.visualMode = hasVmd
+                ? DragAndDropVisualMode.Copy
+                : DragAndDropVisualMode.Rejected;
+            if (currentEvent.type == EventType.DragPerform && hasVmd)
+            {
+                DragAndDrop.AcceptDrag();
+                foreach (DefaultAsset asset in DragAndDrop.objectReferences.OfType<DefaultAsset>())
+                    changed |= AddMotionVmdAsset(asset);
+            }
+            currentEvent.Use();
+        }
+
+        return changed;
+    }
+
+    private static Color GetMotionEntryColor(int index)
+    {
+        Color[] palette = EditorGUIUtility.isProSkin
+            ? DarkMotionEntryColors
+            : LightMotionEntryColors;
+        return palette[Mathf.Abs(index) % palette.Length];
+    }
+
+    private bool DrawMotionVmdDataRow(string label, DefaultAsset current, out DefaultAsset next)
+    {
+        next = current;
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            DefaultAsset selected = (DefaultAsset)EditorGUILayout.ObjectField(
+                label,
+                current,
+                typeof(DefaultAsset),
+                false);
+            if (selected != current)
+            {
+                if (selected == null || IsVmdAsset(selected))
+                {
+                    next = selected;
+                }
+                else
+                {
+                    ShowDialog(
+                        L("VMD文件", "VMD Files", "VMDファイル"),
+                        L("请选择Assets目录中的.vmd文件。",
+                            "Select .vmd files inside Assets.",
+                            "Assets内の.vmdファイルを選択してください。"));
+                }
+            }
+            if (GUILayout.Button("×", GUILayout.Width(24f))) next = null;
+        }
+        return next != current;
+    }
+
+    private void DrawVpdConverter()
+    {
+        ConverterWindowGui.DrawSectionTitle(L("VPD姿势转换", "VPD Pose Conversion", "VPDポーズ変換"));
+        DrawVpdFileList();
+
+        ConverterWindowGui.DrawOutlinedSetting(() =>
+        {
+            vpdConversionSettingsExpanded = EditorGUILayout.Foldout(
+                vpdConversionSettingsExpanded,
+                L("转换设置", "Conversion Settings", "変換設定"),
+                true);
+            if (!vpdConversionSettingsExpanded) return;
+
+            EditorGUILayout.Space(5f);
+            vpdOutputType = (MotionOutputType)EditorGUILayout.Popup(
+                L("输出类型", "Output Type", "出力タイプ"),
+                (int)vpdOutputType,
+                new[]
+                {
+                    "Humanoid",
+                    L("目标校准 Humanoid", "Target-calibrated Humanoid", "対象校正Humanoid")
+                });
+            if (vpdOutputType == MotionOutputType.TargetCalibratedHumanoid)
+            {
+                EditorGUILayout.HelpBox(
+                    L("在目标Avatar骨架上校准后输出标准HumanoidRoot/Muscle曲线, 该方案会额外经过目标 Avatar 的 HumanPoseHandler 校准, 因此转换通常更慢",
+                        "Outputs standard Humanoid Root/Muscle curves after calibration on the target Avatar skeleton. This adds a target Avatar HumanPoseHandler calibration pass, so conversion is usually slower.",
+                        "対象Avatar骨格で校正後、標準Humanoid Root/Muscleカーブを出力します。対象AvatarのHumanPoseHandler校正処理が追加されるため、通常は変換が遅くなります。"),
+                    MessageType.Info);
+            }
+
+            EditorGUILayout.Space(5f);
+            vpdTargetAvatar = (GameObject)EditorGUILayout.ObjectField(
+                vpdOutputType == MotionOutputType.TargetCalibratedHumanoid
+                    ? L("目标 Avatar", "Target Avatar", "対象Avatar")
+                    : L("Morph目标 Avatar（可选）", "Morph Target Avatar (Optional)", "Morph対象Avatar（任意）"),
+                vpdTargetAvatar,
+                typeof(GameObject),
+                true);
+
+            EditorGUILayout.Space(5f);
+            DrawVpdConversionModelSettings();
+
+            EditorGUILayout.Space(5f);
+            DrawStorageLocationSetting(
+                L("输出位置", "Output Location", "出力場所"),
+                ref vpdOutputStorageLocation,
+                ref customVpdOutputStorageFolder,
+                L("输出存储位置", "Output Storage Location", "出力保存場所"));
+            EditorGUILayout.Space(5f);
+            EditorGUILayout.HelpBox(
+                L("每个VPD固定生成一个.anim。姿势写入0与1/30秒两个相同关键帧，不进行密集采样。",
+                    "Each VPD always produces one .anim. The pose is written as identical keys at 0 and 1/30 seconds without dense sampling.",
+                    "各VPDから必ず1つの.animを生成します。ポーズは0秒と1/30秒の同一キーとして書き込み、密なサンプリングは行いません。"),
+                MessageType.None);
+        });
+    }
+
+    private void DrawVpdConversionModelSettings()
+    {
+        vpdRetargetModel = EditorGUILayout.Toggle(
+            L("重定向模型", "Retarget Model", "モデルを置換"),
+            vpdRetargetModel);
+        if (!vpdRetargetModel) return;
+
+        DefaultAsset nextModel = (DefaultAsset)EditorGUILayout.ObjectField(
+            L("MMD模型", "MMD Model", "MMDモデル"),
+            vpdModelAsset,
+            typeof(DefaultAsset),
+            false);
+        if (nextModel == vpdModelAsset) return;
+
+        string modelPath = nextModel != null
+            ? AssetDatabase.GetAssetPath(nextModel)
+            : string.Empty;
+        if (nextModel != null && !VmdMotionConverter.IsModelPath(
+                modelPath, VmdMotionConverter.ModelParserMethod.BuiltInManaged))
+        {
+            ShowDialog(
+                L("MMD模型", "MMD Model", "MMDモデル"),
+                L("内置解析方案仅支持.pmx模型。",
+                    "The built-in parser supports .pmx models only.",
+                    "内蔵解析方式は.pmxモデルのみ対応しています。"));
+            return;
+        }
+        vpdModelAsset = nextModel;
+    }
+
+    private void DrawVpdFileList()
+    {
+        EnsureVpdEntryState();
+        if (vpdAssets.Count > 0)
+        {
+            const float maxListHeight = 220f;
+            float rowHeight = EditorGUIUtility.singleLineHeight +
+                              EditorGUIUtility.standardVerticalSpacing;
+            float contentHeight = 0f;
+            for (int index = 0; index < vpdAssets.Count; index++)
+                contentHeight += rowHeight * (vpdFileFoldouts[index] ? 2f : 1f) +
+                                 (index > 0 ? 5f : 0f);
+            bool useScrollView = contentHeight > maxListHeight;
+            if (useScrollView)
+            {
+                vpdListScroll = EditorGUILayout.BeginScrollView(
+                    vpdListScroll, false, false, GUILayout.Height(maxListHeight));
+            }
+
+            for (int index = 0; index < vpdAssets.Count; index++)
+            {
+                if (index > 0) ConverterWindowGui.DrawEntrySeparator();
+                Color entryColor = GetMotionEntryColor(index);
+                bool removeEntry;
+                Color previousContentColor = GUI.contentColor;
+                GUI.contentColor = entryColor;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    string arrow = vpdFileFoldouts[index] ? "▼ " : "▶ ";
+                    if (GUILayout.Button(
+                            arrow + GetVpdDisplayName(vpdAssets[index]),
+                            EditorStyles.boldLabel,
+                            GUILayout.ExpandWidth(true)))
+                        vpdFileFoldouts[index] = !vpdFileFoldouts[index];
+                    removeEntry = GUILayout.Button(
+                        "×", EditorStyles.miniButton, GUILayout.Width(24f));
+                }
+                GUI.contentColor = previousContentColor;
+                if (removeEntry)
+                {
+                    vpdAssets.RemoveAt(index);
+                    vpdFileFoldouts.RemoveAt(index);
+                    break;
+                }
+                if (!vpdFileFoldouts[index]) continue;
+
+                EditorGUI.indentLevel++;
+                if (DrawVpdDataRow(
+                        L("姿势数据", "Pose Data", "ポーズデータ"),
+                        vpdAssets[index],
+                        out DefaultAsset next))
+                {
+                    if (next == null)
+                    {
+                        vpdAssets[index] = null;
+                    }
+                    else
+                    {
+                        string nextPath = GetVpdAssetPath(next);
+                        bool duplicate = vpdAssets
+                            .Where((_, otherIndex) => otherIndex != index)
+                            .Any(other => string.Equals(
+                                GetVpdAssetPath(other), nextPath,
+                                StringComparison.OrdinalIgnoreCase));
+                        if (duplicate)
+                        {
+                            ShowDialog(
+                                L("VPD文件", "VPD Files", "VPDファイル"),
+                                L("该VPD已在列表中。",
+                                    "That VPD is already in the list.",
+                                    "そのVPDはすでにリストにあります。"));
+                        }
+                        else
+                        {
+                            vpdAssets[index] = next;
+                        }
+                    }
+                }
+                EditorGUI.indentLevel--;
+                if (vpdAssets[index] != null) continue;
+                vpdAssets.RemoveAt(index);
+                vpdFileFoldouts.RemoveAt(index);
+                break;
+            }
+            if (useScrollView) EditorGUILayout.EndScrollView();
+        }
+
+        Rect dropRect = GUILayoutUtility.GetRect(0f, 42f, GUILayout.ExpandWidth(true));
+        var dropStyle = new GUIStyle(GUI.skin.box) { alignment = TextAnchor.MiddleCenter };
+        GUI.Box(
+            dropRect,
+            L("拖入一个或多个VPD文件",
+                "Drop one or more VPD files",
+                "1つ以上のVPDファイルをドロップ"),
+            dropStyle);
+        Event currentEvent = Event.current;
+        if (!dropRect.Contains(currentEvent.mousePosition) ||
+            (currentEvent.type != EventType.DragUpdated &&
+             currentEvent.type != EventType.DragPerform))
+            return;
+
+        bool hasVpd = DragAndDrop.objectReferences.OfType<DefaultAsset>().Any(IsVpdAsset);
+        DragAndDrop.visualMode = hasVpd
+            ? DragAndDropVisualMode.Copy
+            : DragAndDropVisualMode.Rejected;
+        if (currentEvent.type == EventType.DragPerform && hasVpd)
+        {
+            DragAndDrop.AcceptDrag();
+            foreach (DefaultAsset asset in DragAndDrop.objectReferences.OfType<DefaultAsset>())
+                AddVpdAsset(vpdAssets, asset);
+            EnsureVpdEntryState();
+        }
+        currentEvent.Use();
+    }
+
+    private bool DrawVpdDataRow(string label, DefaultAsset current, out DefaultAsset next)
+    {
+        next = current;
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            DefaultAsset selected = (DefaultAsset)EditorGUILayout.ObjectField(
+                label, current, typeof(DefaultAsset), false);
+            if (selected != current)
+            {
+                if (selected == null || IsVpdAsset(selected))
+                {
+                    next = selected;
+                }
+                else
+                {
+                    ShowDialog(
+                        L("VPD文件", "VPD Files", "VPDファイル"),
+                        L("请选择Assets目录中的.vpd文件。",
+                            "Select .vpd files inside Assets.",
+                            "Assets内の.vpdファイルを選択してください。"));
+                }
+            }
+            if (GUILayout.Button("×", GUILayout.Width(24f))) next = null;
+        }
+        return next != current;
+    }
+
     private void DrawPmxSettings()
     {
         NormalizeModelParser();
-        DrawSectionTitle(L("PMX转换设置", "PMX Conversion Settings", "PMX変換設定"));
+        ConverterWindowGui.DrawSectionTitle(L("PMX转换设置", "PMX Conversion Settings", "PMX変換設定"));
 
         IReadOnlyList<VmdMotionConverter.ModelParserMethod> parsers =
             VmdMotionConverter.GetAvailableModelParsers();
         string[] parserLabels = parsers.Select(GetModelParserLabel).ToArray();
         int currentIndex = Mathf.Max(0, parsers.ToList().IndexOf(modelParserMethod));
-        int nextIndex = EditorGUILayout.Popup(
-            L("模型解析方式", "Model Parser", "モデル解析方式"),
-            currentIndex,
-            parserLabels);
+        int nextIndex;
+        using (new EditorGUI.DisabledScope(IsTargetCalibratedHumanoid))
+            nextIndex = EditorGUILayout.Popup(
+                L("模型解析方式", "Model Parser", "モデル解析方式"),
+                currentIndex,
+                parserLabels);
         modelParserMethod = parsers[Mathf.Clamp(nextIndex, 0, parsers.Count - 1)];
 
         if (modelParserMethod != VmdMotionConverter.ModelParserMethod.BuiltInManaged)
@@ -743,7 +1261,7 @@ public sealed class VmdConverterWindow : EditorWindow
 
     private void DrawBuiltInDebugSettings()
     {
-        DrawSectionTitle(L("内置解析方案调试", "Built-in Parser Debug", "内蔵解析方式のデバッグ"));
+        ConverterWindowGui.DrawSectionTitle(L("内置解析方案调试", "Built-in Parser Debug", "内蔵解析方式のデバッグ"));
         debugPmxAsset = (DefaultAsset)EditorGUILayout.ObjectField(
             L("PMX文件", "PMX File", "PMXファイル"),
             debugPmxAsset,
@@ -761,7 +1279,9 @@ public sealed class VmdConverterWindow : EditorWindow
             new[]
             {
                 "Humanoid",
-                L("通用骨骼", "Generic Transform", "汎用ボーン")
+                L("通用骨骼", "Generic Transform", "汎用ボーン"),
+                L("目标模型 FK 保真模式", "Target-model FK Fidelity", "対象モデルFK忠実モード"),
+                L("目标校准 Humanoid", "Target-calibrated Humanoid", "対象校正Humanoid")
             });
 
         if (debugOutput == BuiltInDebugOutput.Humanoid)
@@ -778,7 +1298,10 @@ public sealed class VmdConverterWindow : EditorWindow
         else
         {
             debugSkeletonRoot = (GameObject)EditorGUILayout.ObjectField(
-                L("现有PMX骨架根", "Existing PMX Skeleton Root", "既存PMXスケルトンルート"),
+                debugOutput == BuiltInDebugOutput.TargetModelFkFidelity ||
+                debugOutput == BuiltInDebugOutput.TargetCalibratedHumanoid
+                    ? L("目标 Humanoid 模型根", "Target Humanoid Model Root", "対象Humanoidモデルルート")
+                    : L("现有PMX骨架根", "Existing PMX Skeleton Root", "既存PMXスケルトンルート"),
                 debugSkeletonRoot,
                 typeof(GameObject),
                 true);
@@ -814,6 +1337,19 @@ public sealed class VmdConverterWindow : EditorWindow
             curveReductionError,
             0f,
             0.001f);
+        if (debugOutput == BuiltInDebugOutput.TargetModelFkFidelity)
+        {
+            fkRotationErrorDegrees = EditorGUILayout.Slider(
+                L("FK旋转角误差 (度)", "FK Rotation Error (deg)", "FK回転角誤差（度）"),
+                fkRotationErrorDegrees,
+                0f,
+                0.1f);
+            fkPositionError = EditorGUILayout.Slider(
+                L("FK根位置误差", "FK Root Position Error", "FKルート位置誤差"),
+                fkPositionError,
+                0f,
+                0.001f);
+        }
 
         string pmxPath = AssetDatabase.GetAssetPath(debugPmxAsset);
         string vmdPath = AssetDatabase.GetAssetPath(debugVmdAsset);
@@ -829,7 +1365,7 @@ public sealed class VmdConverterWindow : EditorWindow
 
     private void DrawPmxCacheManagement()
     {
-        DrawSectionTitle(L("PMX解析缓存管理", "PMX Parse Cache", "PMX解析キャッシュ管理"));
+        ConverterWindowGui.DrawSectionTitle(L("PMX解析缓存管理", "PMX Parse Cache", "PMX解析キャッシュ管理"));
         PmxModelCache.GetDiskCacheStats(out int cacheFiles, out long cacheBytes);
         EditorGUILayout.LabelField(
             L("PMX解析缓存", "PMX Parse Cache", "PMX解析キャッシュ"),
@@ -922,6 +1458,27 @@ public sealed class VmdConverterWindow : EditorWindow
                     options,
                     progress);
             }
+            else if (debugOutput == BuiltInDebugOutput.TargetCalibratedHumanoid)
+            {
+                report = PmxTargetHumanoidAnimationClipBaker.BakeToAsset(
+                    pmxPath,
+                    vmdPath,
+                    debugSkeletonRoot,
+                    outputPath,
+                    options,
+                    progress);
+            }
+            else if (debugOutput == BuiltInDebugOutput.TargetModelFkFidelity)
+            {
+                report = PmxTargetFkAnimationClipBaker.BakeToAsset(
+                    pmxPath,
+                    vmdPath,
+                    debugSkeletonRoot,
+                    outputPath,
+                    options,
+                    CreateFkBakeOptions(),
+                    progress);
+            }
             else
             {
                 report = PmxAnimationClipBaker.BakeToAsset(
@@ -960,11 +1517,29 @@ public sealed class VmdConverterWindow : EditorWindow
         }
     }
 
+    private PmxTargetFkBakeOptions CreateFkBakeOptions()
+    {
+        return new PmxTargetFkBakeOptions
+        {
+            RotationErrorDegrees = Mathf.Clamp(fkRotationErrorDegrees, 0f, 0.1f),
+            PositionError = Mathf.Clamp(fkPositionError, 0f, 0.001f),
+            BakeRootTranslation = true
+        };
+    }
+
     private static bool IsAssetExtension(string path, string extension)
     {
         return !string.IsNullOrEmpty(path) &&
                path.StartsWith("Assets/", StringComparison.Ordinal) &&
                path.EndsWith(extension, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasValidHumanoidAnimator(GameObject model)
+    {
+        if (model == null) return false;
+        Animator animator = model.GetComponent<Animator>() ?? model.GetComponentInChildren<Animator>(true);
+        return animator != null && animator.avatar != null &&
+               animator.avatar.isValid && animator.avatar.isHuman;
     }
 
     private static string GetProgressStage(string message)
@@ -987,18 +1562,23 @@ public sealed class VmdConverterWindow : EditorWindow
                 string directModelPath = retargetModel
                     ? AssetDatabase.GetAssetPath(motionModelAsset)
                     : VmdMotionConverter.DefaultModelPath;
+                GameObject directTargetModel = pipelineModels.Count > 0
+                    ? pipelineModels[Mathf.Clamp(selectedModelIndex, 0, pipelineModels.Count - 1)]
+                    : null;
                 bool canDirectConvert = sourcePaths.Count > 0 &&
-                                        pipelineModels.Count > 0 &&
+                                        directTargetModel != null &&
                                         outputStorageValid &&
+                                        (!IsTargetCalibratedHumanoid ||
+                                         (modelParserMethod == VmdMotionConverter.ModelParserMethod.BuiltInManaged &&
+                                          HasValidHumanoidAnimator(directTargetModel))) &&
                                         (!retargetModel || VmdMotionConverter.IsModelPath(
                                             directModelPath, modelParserMethod));
                 using (new EditorGUI.DisabledScope(!canDirectConvert))
                 {
                     if (GUILayout.Button(L("转换", "Convert", "変換"), GUILayout.Height(30f)))
                     {
-                        selectedModelIndex = Mathf.Clamp(selectedModelIndex, 0, pipelineModels.Count - 1);
                         ConvertDirectMotions(
-                            sourcePaths, directModelPath, pipelineModels[selectedModelIndex]);
+                            sourcePaths, directModelPath, directTargetModel);
                     }
                 }
                 return;
@@ -1032,7 +1612,7 @@ public sealed class VmdConverterWindow : EditorWindow
             using (new EditorGUI.DisabledScope(!canExport))
             {
                 if (!GUILayout.Button(
-                        L("导出动画", "Export Animation", "アニメーションを書き出す"),
+                        L("转换", "Convert", "変換"),
                         GUILayout.Height(30f)))
                     return;
 
@@ -1043,27 +1623,35 @@ public sealed class VmdConverterWindow : EditorWindow
             return;
         }
 
-        List<string> cameraSourcePaths = GetVmdAssetPaths(cameraVmdAssets);
-        using (new EditorGUI.DisabledScope(
-                   cameraSourcePaths.Count == 0 || !TryGetCameraOutputStorageFolder(out _)))
+        if (selectedTab == 1)
         {
-            if (GUILayout.Button(L("转换", "Convert", "変換"), GUILayout.Height(30f)))
-                ConvertCameras(cameraSourcePaths);
-        }
-    }
-
-    private static void DrawOutline(Rect rect)
-    {
-        if (Event.current.type != EventType.Repaint || rect.width <= 0f || rect.height <= 0f)
+            List<string> cameraSourcePaths = GetVmdAssetPaths(cameraVmdAssets);
+            using (new EditorGUI.DisabledScope(
+                       cameraSourcePaths.Count == 0 || !TryGetCameraOutputStorageFolder(out _)))
+            {
+                if (GUILayout.Button(L("转换", "Convert", "変換"), GUILayout.Height(30f)))
+                    ConvertCameras(cameraSourcePaths);
+            }
             return;
+        }
 
-        Color color = EditorGUIUtility.isProSkin
-            ? new Color(0.48f, 0.48f, 0.48f, 1f)
-            : new Color(0.42f, 0.42f, 0.42f, 1f);
-        EditorGUI.DrawRect(new Rect(rect.x, rect.y, rect.width, 1f), color);
-        EditorGUI.DrawRect(new Rect(rect.x, rect.yMax - 1f, rect.width, 1f), color);
-        EditorGUI.DrawRect(new Rect(rect.x, rect.y, 1f, rect.height), color);
-        EditorGUI.DrawRect(new Rect(rect.xMax - 1f, rect.y, 1f, rect.height), color);
+        List<string> vpdSourcePaths = GetVpdAssetPaths(vpdAssets);
+        string vpdModelPath = vpdRetargetModel
+            ? AssetDatabase.GetAssetPath(vpdModelAsset)
+            : VmdMotionConverter.DefaultModelPath;
+        bool needsTarget = vpdOutputType == MotionOutputType.TargetCalibratedHumanoid;
+        bool canConvertVpd = vpdSourcePaths.Count > 0 &&
+                             VmdMotionConverter.IsModelPath(
+                                 vpdModelPath,
+                                 VmdMotionConverter.ModelParserMethod.BuiltInManaged) &&
+                             TryGetVpdOutputStorageFolder(out _) &&
+                             (!needsTarget || HasValidHumanoidAnimator(vpdTargetAvatar));
+        using (new EditorGUI.DisabledScope(!canConvertVpd))
+        {
+            if (GUILayout.Button(L("转换", "Convert", "変換"),
+                    GUILayout.Height(30f)))
+                ConvertVpds(vpdSourcePaths, vpdModelPath, vpdTargetAvatar);
+        }
     }
 
     private void ConvertMotions(IReadOnlyList<string> sourcePaths, string modelPath)
@@ -1118,7 +1706,8 @@ public sealed class VmdConverterWindow : EditorWindow
                     motionConversionScheme,
                     batchSession,
                     assetEditing,
-                    assetStorageFolder);
+                    assetStorageFolder,
+                    GetExpressionVmdPath(sourcePath));
                 if (data == null)
                 {
                     skipped++;
@@ -1209,6 +1798,7 @@ public sealed class VmdConverterWindow : EditorWindow
                     throw new InvalidOperationException("The transient VMD mapping data is missing.");
                 sourceClip = VmdMotionConverter.ConvertDirectSourceClip(
                     sourcePath,
+                    GetExpressionVmdPath(sourcePath),
                     modelPath,
                     modelParserMethod,
                     curveReductionError,
@@ -1285,6 +1875,7 @@ public sealed class VmdConverterWindow : EditorWindow
         IReadOnlyList<string> sourcePaths, string modelPath, GameObject directTargetModel = null)
     {
         bool directExport = directTargetModel != null;
+        bool targetCalibratedExport = directExport && IsTargetCalibratedHumanoid;
         string assetStorageFolder = null;
         string outputStorageFolder = null;
         if (directExport)
@@ -1322,7 +1913,9 @@ public sealed class VmdConverterWindow : EditorWindow
                 {
                     Ordinal = pending.Count,
                     AssetPath = sourcePath,
-                    PhysicalPath = VmdMotionConverter.GetPhysicalVmdPath(sourcePath)
+                    PhysicalPath = VmdMotionConverter.GetPhysicalVmdPath(sourcePath),
+                    ExpressionAssetPath = GetExpressionVmdPath(sourcePath),
+                    ExpressionPhysicalPath = GetExpressionPhysicalVmdPath(sourcePath)
                 });
             }
             catch (Exception exception)
@@ -1346,7 +1939,8 @@ public sealed class VmdConverterWindow : EditorWindow
         var active = new List<ManagedPreparationJob>();
         try
         {
-            batchSession = VmdMotionConverter.CreateManagedBatchSession(modelPath, curveReductionError);
+            batchSession = VmdMotionConverter.CreateManagedBatchSession(
+                modelPath, curveReductionError, !targetCalibratedExport);
             if (!directExport && pending.Count > 1)
             {
                 AssetDatabase.StartAssetEditing();
@@ -1367,6 +1961,7 @@ public sealed class VmdConverterWindow : EditorWindow
                 job.Work = Task.Run(
                     () => VmdMotionConverter.PrepareManagedConversion(
                         job.PhysicalPath,
+                        job.ExpressionPhysicalPath,
                         batchSession,
                         frameParallelism,
                         (completedSamples, totalSamples) =>
@@ -1480,10 +2075,16 @@ public sealed class VmdConverterWindow : EditorWindow
                         AnimationClip sourceClip = null;
                         try
                         {
-                            sourceClip = VmdMotionConverter.BakeManagedSourceClip(
-                                prepared,
-                                batchSession,
-                                (value, message) => progress(value * 0.72f, message));
+                            sourceClip = targetCalibratedExport
+                                ? VmdMotionConverter.BakeManagedTargetHumanoidSourceClip(
+                                    prepared,
+                                    batchSession,
+                                    directTargetModel,
+                                    (value, message) => progress(value * 0.72f, message))
+                                : VmdMotionConverter.BakeManagedSourceClip(
+                                    prepared,
+                                    batchSession,
+                                    (value, message) => progress(value * 0.72f, message));
                             AnimationClip clip = VmdMotionConverter.Export(
                                 entry.Data,
                                 directTargetModel,
@@ -1516,7 +2117,8 @@ public sealed class VmdConverterWindow : EditorWindow
                             motionConversionScheme,
                             assetEditing,
                             progress,
-                            assetStorageFolder);
+                            assetStorageFolder,
+                            completedJob.ExpressionAssetPath);
                         converted++;
                         lastData = data;
                     }
@@ -1784,20 +2386,22 @@ public sealed class VmdConverterWindow : EditorWindow
             for (int index = 0; index < sourcePaths.Count; index++)
             {
                 string path = sourcePaths[index];
+                string expressionPath = GetExpressionVmdPath(path);
                 EditorUtility.DisplayProgressBar(
                     L("加载已转换资源", "Loading Converted Resources", "変換済みリソースを読み込み"),
                     $"[{index + 1}/{sourcePaths.Count}] {Path.GetFileName(path)}",
                     (index + 1f) / Mathf.Max(1, sourcePaths.Count));
                 if (motionConversionScheme == VmdMotionConversionScheme.DirectExport)
                 {
-                    string dependencyHash = AssetDatabase.GetAssetDependencyHash(path).ToString();
+                    string dependencyHash = GetMotionEntryDependencyHash(path, expressionPath);
                     if (!transientMotionData.TryGetValue(path, out VmdMotionConversionData transient) ||
                         transient == null ||
                         !string.Equals(
                             transient.sourceVmdDependencyHash, dependencyHash, StringComparison.Ordinal))
                     {
                         if (transient != null) UnityEngine.Object.DestroyImmediate(transient);
-                        transient = VmdMotionConverter.CreateTransientData(path);
+                        transient = VmdMotionConverter.CreateTransientData(path, expressionPath);
+                        transient.sourceVmdDependencyHash = dependencyHash;
                         transientMotionData[path] = transient;
                     }
                     convertedMotionEntries.Add(new ConvertedMotionEntry
@@ -1812,7 +2416,8 @@ public sealed class VmdConverterWindow : EditorWindow
 
                 VmdMotionConversionData data = VmdMotionConverter.LoadData(
                     path, assetStorageFolder);
-                if (!VmdMotionConverter.IsConvertedFor(data, path, motionConversionScheme)) continue;
+                if (!VmdMotionConverter.IsConvertedFor(
+                        data, path, motionConversionScheme, expressionPath)) continue;
                 convertedMotionEntries.Add(new ConvertedMotionEntry
                 {
                     Path = path,
@@ -1836,6 +2441,40 @@ public sealed class VmdConverterWindow : EditorWindow
         transientMotionData.Clear();
     }
 
+    private string GetExpressionVmdPath(string motionPath)
+    {
+        if (string.IsNullOrEmpty(motionPath)) return null;
+        EnsureMotionVmdEntryState();
+        for (int index = 0; index < motionVmdAssets.Count; index++)
+        {
+            if (!string.Equals(GetVmdAssetPath(motionVmdAssets[index]), motionPath,
+                    StringComparison.OrdinalIgnoreCase))
+                continue;
+            string expressionPath = GetVmdAssetPath(motionExpressionVmdAssets[index]);
+            return string.Equals(expressionPath, motionPath, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : expressionPath;
+        }
+        return null;
+    }
+
+    private string GetExpressionPhysicalVmdPath(string motionPath)
+    {
+        string expressionPath = GetExpressionVmdPath(motionPath);
+        return string.IsNullOrEmpty(expressionPath)
+            ? null
+            : VmdMotionConverter.GetPhysicalVmdPath(expressionPath);
+    }
+
+    private static string GetMotionEntryDependencyHash(
+        string motionPath, string expressionPath)
+    {
+        string motionHash = AssetDatabase.GetAssetDependencyHash(motionPath).ToString();
+        if (string.IsNullOrEmpty(expressionPath)) return motionHash + "|";
+        return motionHash + "|" + expressionPath + ":" +
+               AssetDatabase.GetAssetDependencyHash(expressionPath);
+    }
+
     private void ScanPipelineModels()
     {
         GameObject selectedModel = selectedModelIndex >= 0 && selectedModelIndex < pipelineModels.Count
@@ -1845,27 +2484,6 @@ public sealed class VmdConverterWindow : EditorWindow
         pipelineModels.AddRange(VmdMotionConverter.FindPipelineModels());
         selectedModelIndex = selectedModel != null ? pipelineModels.IndexOf(selectedModel) : 0;
         if (selectedModelIndex < 0) selectedModelIndex = 0;
-    }
-
-    private static void DrawSectionTitle(string title)
-    {
-        EditorGUILayout.Space(4f);
-        GUILayout.Label(title, new GUIStyle(EditorStyles.boldLabel)
-        {
-            fontSize = 16,
-            alignment = TextAnchor.MiddleCenter
-        });
-        EditorGUILayout.Space(6f);
-    }
-
-    private static void DrawCenteredLabel(string text, GUIStyle style)
-    {
-        using (new EditorGUILayout.HorizontalScope())
-        {
-            GUILayout.FlexibleSpace();
-            GUILayout.Label(text, style);
-            GUILayout.FlexibleSpace();
-        }
     }
 
     private static string GetHierarchyPath(GameObject gameObject)
@@ -1954,10 +2572,44 @@ public sealed class VmdConverterWindow : EditorWindow
     private void EnsureVmdLists()
     {
         if (motionVmdAssets == null) motionVmdAssets = new List<DefaultAsset>();
+        if (motionExpressionVmdAssets == null)
+            motionExpressionVmdAssets = new List<DefaultAsset>();
+        if (motionVmdFileFoldouts == null)
+            motionVmdFileFoldouts = new List<bool>();
+        EnsureMotionVmdEntryState();
         if (cameraVmdAssets == null) cameraVmdAssets = new List<DefaultAsset>();
+        if (vpdAssets == null) vpdAssets = new List<DefaultAsset>();
+        if (vpdFileFoldouts == null) vpdFileFoldouts = new List<bool>();
+        EnsureVpdEntryState();
         if (convertedMotionEntries == null) convertedMotionEntries = new List<ConvertedMotionEntry>();
         if (mappingFoldouts == null) mappingFoldouts = new Dictionary<string, bool>();
         if (mappingPageIndices == null) mappingPageIndices = new Dictionary<string, int>();
+    }
+
+    private void EnsureMotionVmdEntryState()
+    {
+        if (motionExpressionVmdAssets == null)
+            motionExpressionVmdAssets = new List<DefaultAsset>();
+        if (motionVmdFileFoldouts == null)
+            motionVmdFileFoldouts = new List<bool>();
+        while (motionExpressionVmdAssets.Count < motionVmdAssets.Count)
+            motionExpressionVmdAssets.Add(motionVmdAssets[motionExpressionVmdAssets.Count]);
+        while (motionExpressionVmdAssets.Count > motionVmdAssets.Count)
+            motionExpressionVmdAssets.RemoveAt(motionExpressionVmdAssets.Count - 1);
+        while (motionVmdFileFoldouts.Count < motionVmdAssets.Count)
+            motionVmdFileFoldouts.Add(false);
+        while (motionVmdFileFoldouts.Count > motionVmdAssets.Count)
+            motionVmdFileFoldouts.RemoveAt(motionVmdFileFoldouts.Count - 1);
+    }
+
+    private void EnsureVpdEntryState()
+    {
+        if (vpdAssets == null) vpdAssets = new List<DefaultAsset>();
+        if (vpdFileFoldouts == null) vpdFileFoldouts = new List<bool>();
+        while (vpdFileFoldouts.Count < vpdAssets.Count)
+            vpdFileFoldouts.Add(false);
+        while (vpdFileFoldouts.Count > vpdAssets.Count)
+            vpdFileFoldouts.RemoveAt(vpdFileFoldouts.Count - 1);
     }
 
     private bool GetMappingFoldout(string key, bool defaultExpanded)
@@ -2052,10 +2704,39 @@ public sealed class VmdConverterWindow : EditorWindow
         return true;
     }
 
+    private bool AddMotionVmdAsset(DefaultAsset asset)
+    {
+        EnsureMotionVmdEntryState();
+        if (!AddVmdAsset(motionVmdAssets, asset)) return false;
+        motionExpressionVmdAssets.Add(asset);
+        motionVmdFileFoldouts.Add(false);
+        return true;
+    }
+
     private static List<string> GetVmdAssetPaths(IEnumerable<DefaultAsset> assets)
     {
         return assets
             .Select(GetVmdAssetPath)
+            .Where(path => !string.IsNullOrEmpty(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static bool AddVpdAsset(List<DefaultAsset> assets, DefaultAsset asset)
+    {
+        string path = GetVpdAssetPath(asset);
+        if (string.IsNullOrEmpty(path)) return false;
+        if (assets.Any(existing => string.Equals(
+                GetVpdAssetPath(existing), path, StringComparison.OrdinalIgnoreCase)))
+            return false;
+        assets.Add(asset);
+        return true;
+    }
+
+    private static List<string> GetVpdAssetPaths(IEnumerable<DefaultAsset> assets)
+    {
+        return assets
+            .Select(GetVpdAssetPath)
             .Where(path => !string.IsNullOrEmpty(path))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -2067,6 +2748,137 @@ public sealed class VmdConverterWindow : EditorWindow
         return string.IsNullOrEmpty(path)
             ? L("（空）", "(Empty)", "（空）")
             : Path.GetFileNameWithoutExtension(path);
+    }
+
+    private string GetVpdDisplayName(DefaultAsset asset)
+    {
+        string path = GetVpdAssetPath(asset);
+        return string.IsNullOrEmpty(path)
+            ? L("（空）", "(Empty)", "（空）")
+            : Path.GetFileNameWithoutExtension(path);
+    }
+
+    private void ConvertVpds(
+        IReadOnlyList<string> sourcePaths, string modelPath, GameObject targetAvatar)
+    {
+        if (!TryGetVpdOutputStorageFolder(out string outputStorageFolder))
+            throw new InvalidOperationException("The VPD output storage folder must be inside Assets.");
+
+        int converted = 0;
+        int skipped = 0;
+        bool cancelled = false;
+        var errors = new List<string>();
+        AnimationClip lastClip = null;
+        PmxHumanoidAnimationClipBaker.BatchSession batchSession = null;
+        try
+        {
+            PmxModel model = PmxModelCache.Load(modelPath);
+            var options = new PmxAnimationClipBakerOptions
+            {
+                SampleRate = VmdFrameRate,
+                PositionScale = 0.08f,
+                CoordinateConversion = PmxCoordinateConversion.RotateY180,
+                BakeMorphs = true,
+                CurveReductionError = Mathf.Clamp(curveReductionError, 0f, 0.001f)
+            };
+            bool targetCalibrated = vpdOutputType == MotionOutputType.TargetCalibratedHumanoid;
+            batchSession = new PmxHumanoidAnimationClipBaker.BatchSession(
+                model, options, !targetCalibrated);
+
+            for (int fileIndex = 0; fileIndex < sourcePaths.Count; fileIndex++)
+            {
+                string sourcePath = sourcePaths[fileIndex];
+                string outputPath = GetVpdOutputPath(sourcePath, outputStorageFolder);
+                try
+                {
+                    if (AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(outputPath) != null &&
+                        !ConfirmOverwrite("Overwrite VPD animation", outputPath, "Overwrite"))
+                    {
+                        skipped++;
+                        continue;
+                    }
+
+                    double lastProgressUpdate = double.NegativeInfinity;
+                    Action<float, string> progress = (value, message) =>
+                    {
+                        double now = EditorApplication.timeSinceStartup;
+                        if (value < 1f && now - lastProgressUpdate < 0.08d) return;
+                        lastProgressUpdate = now;
+                        if (EditorUtility.DisplayCancelableProgressBar(
+                                L("VPD转换", "VPD Conversion", "VPD変換"),
+                                $"[{fileIndex + 1}/{sourcePaths.Count}] " +
+                                Path.GetFileName(sourcePath) + " — " + message,
+                                (fileIndex + Mathf.Clamp01(value)) / Mathf.Max(1f, sourcePaths.Count)))
+                            throw new OperationCanceledException("VPD conversion was cancelled.");
+                    };
+
+                    progress(0.02f, "Reading VPD pose");
+                    VmdMotion motion = VpdParser.Parse(
+                        PmxAnimationClipBaker.ToPhysicalPath(sourcePath));
+                    PmxHumanoidAnimationClipBaker.PreparedMotion prepared =
+                        batchSession.Prepare(motion, 1);
+                    PmxAnimationBakeReport report;
+                    if (targetCalibrated)
+                    {
+                        report = batchSession.BakeTargetHumanoid(
+                            prepared, targetAvatar,
+                            (value, message) => progress(0.12f + value * 0.78f, message));
+                        if (targetAvatar != null)
+                            report.BoundMorphCount = PmxAnimationClipBaker.BakeMorphCurves(
+                                report.Clip, motion, targetAvatar.transform);
+                    }
+                    else
+                    {
+                        report = batchSession.Bake(
+                            prepared,
+                            targetAvatar != null ? targetAvatar.transform : null,
+                            (value, message) => progress(0.12f + value * 0.78f, message));
+                    }
+
+                    progress(0.92f, "Writing AnimationClip asset");
+                    report.Clip.name = Path.GetFileNameWithoutExtension(outputPath);
+                    VmdMotionConverter.EnsureAssetFolderExists(
+                        Path.GetDirectoryName(outputPath)?.Replace('\\', '/'));
+                    AssetDatabase.DeleteAsset(outputPath);
+                    AssetDatabase.CreateAsset(report.Clip, outputPath);
+                    AssetDatabase.SaveAssets();
+                    AssetDatabase.ImportAsset(
+                        outputPath, ImportAssetOptions.ForceSynchronousImport);
+                    lastClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(outputPath);
+                    converted++;
+                    progress(1f, "Conversion complete");
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled = true;
+                    break;
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogException(exception);
+                    errors.Add(Path.GetFileName(sourcePath) + ": " + exception.Message);
+                }
+                finally
+                {
+                    EditorUtility.ClearProgressBar();
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            Debug.LogException(exception);
+            errors.Add("VPD conversion initialization failed: " + exception.Message);
+        }
+        finally
+        {
+            if (batchSession != null) batchSession.Dispose();
+            EditorUtility.ClearProgressBar();
+        }
+
+        ApplyExportedClip(lastClip);
+        ShowBatchResult(
+            L("VPD转换", "VPD Conversion", "VPD変換"),
+            converted, skipped, errors, cancelled);
     }
 
     private void ConvertCameras(IReadOnlyList<string> sourcePaths)
@@ -2592,9 +3404,35 @@ public sealed class VmdConverterWindow : EditorWindow
             : string.Empty;
     }
 
+    private static bool IsVpdAsset(DefaultAsset asset)
+    {
+        return !string.IsNullOrEmpty(GetVpdAssetPath(asset));
+    }
+
+    private static string GetVpdAssetPath(DefaultAsset asset)
+    {
+        if (asset == null) return string.Empty;
+        string path = AssetDatabase.GetAssetPath(asset);
+        return path.StartsWith("Assets/", StringComparison.Ordinal) &&
+               path.EndsWith(".vpd", StringComparison.OrdinalIgnoreCase)
+            ? path
+            : string.Empty;
+    }
+
     private static string GetCameraOutputPath(string sourcePath, string outputFolder)
     {
         string fileName = Path.GetFileNameWithoutExtension(sourcePath) + "_Camera.anim";
+        if (string.IsNullOrEmpty(outputFolder))
+        {
+            string sourceFolder = Path.GetDirectoryName(sourcePath)?.Replace('\\', '/');
+            return string.IsNullOrEmpty(sourceFolder) ? fileName : sourceFolder + "/" + fileName;
+        }
+        return outputFolder.TrimEnd('/') + "/" + fileName;
+    }
+
+    private static string GetVpdOutputPath(string sourcePath, string outputFolder)
+    {
+        string fileName = Path.GetFileNameWithoutExtension(sourcePath) + "_VPD.anim";
         if (string.IsNullOrEmpty(outputFolder))
         {
             string sourceFolder = Path.GetDirectoryName(sourcePath)?.Replace('\\', '/');
@@ -2619,6 +3457,12 @@ public sealed class VmdConverterWindow : EditorWindow
     {
         return TryResolveStorageFolder(
             cameraOutputStorageLocation, customCameraOutputStorageFolder, out folder);
+    }
+
+    private bool TryGetVpdOutputStorageFolder(out string folder)
+    {
+        return TryResolveStorageFolder(
+            vpdOutputStorageLocation, customVpdOutputStorageFolder, out folder);
     }
 
     private static bool TryResolveStorageFolder(

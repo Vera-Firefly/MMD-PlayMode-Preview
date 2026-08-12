@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using UnityEngine;
@@ -34,39 +35,43 @@ namespace VRChat.MmdPreview.Pmx2Fbx
 
                 int modelNameLength = motion.Header.IndexOf("0002", StringComparison.Ordinal) >= 0 ? 20 : 10;
                 motion.ModelName = ReadFixedString(reader, stream, modelNameLength, shiftJis, "model name");
+                var fixedNames = new FixedStringCache(20, shiftJis);
 
-                ReadBoneFrames(reader, stream, shiftJis, motion);
-                ReadMorphFrames(reader, stream, shiftJis, motion);
+                ReadBoneFrames(reader, stream, fixedNames, motion);
+                ReadMorphFrames(reader, stream, fixedNames, motion);
                 if (stream.Position < stream.Length) ReadCameraFrames(reader, stream, motion);
                 if (stream.Position < stream.Length) ReadLightFrames(reader, stream, motion);
                 if (stream.Position < stream.Length) ReadShadowFrames(reader, stream, motion);
-                if (stream.Position < stream.Length) ReadIkFrames(reader, stream, shiftJis, motion);
+                if (stream.Position < stream.Length) ReadIkFrames(reader, stream, fixedNames, motion);
                 motion.FinalizeData();
                 return motion;
             }
         }
 
-        private static void ReadBoneFrames(BinaryReader reader, Stream stream, Encoding encoding, VmdMotion motion)
+        private static void ReadBoneFrames(BinaryReader reader, Stream stream,
+            FixedStringCache names, VmdMotion motion)
         {
             uint count = ReadCount(reader, stream, "bone");
             motion.BoneKeyframes.Capacity = CheckedCapacity(count);
+            var interpolation = new byte[64];
             for (uint index = 0; index < count; index++)
             {
                 EnsureRemaining(stream, 111, "bone frame");
                 var key = new VmdBoneKeyframe
                 {
-                    BoneName = ReadFixedString(reader, stream, 15, encoding, "bone name"),
+                    BoneName = names.Read(reader, stream, 15, "bone name"),
                     Frame = reader.ReadUInt32(),
                     Translation = ReadVector3(reader),
                     Rotation = NormalizeSafe(ReadQuaternion(reader))
                 };
-                byte[] interpolation = reader.ReadBytes(64);
+                ReadExactly(reader, interpolation);
                 key.Interpolation = DecodeBoneInterpolation(interpolation);
                 motion.BoneKeyframes.Add(key);
             }
         }
 
-        private static void ReadMorphFrames(BinaryReader reader, Stream stream, Encoding encoding, VmdMotion motion)
+        private static void ReadMorphFrames(BinaryReader reader, Stream stream,
+            FixedStringCache names, VmdMotion motion)
         {
             uint count = ReadCount(reader, stream, "morph");
             motion.MorphKeyframes.Capacity = CheckedCapacity(count);
@@ -75,7 +80,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx
                 EnsureRemaining(stream, 23, "morph frame");
                 motion.MorphKeyframes.Add(new VmdMorphKeyframe
                 {
-                    MorphName = ReadFixedString(reader, stream, 15, encoding, "morph name"),
+                    MorphName = names.Read(reader, stream, 15, "morph name"),
                     Frame = reader.ReadUInt32(),
                     Weight = reader.ReadSingle()
                 });
@@ -86,6 +91,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx
         {
             uint count = ReadCount(reader, stream, "camera");
             motion.CameraKeyframes.Capacity = CheckedCapacity(count);
+            var interpolation = new byte[24];
             for (uint index = 0; index < count; index++)
             {
                 EnsureRemaining(stream, 61, "camera frame");
@@ -96,7 +102,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx
                     Position = ReadVector3(reader),
                     RotationRadians = ReadVector3(reader)
                 };
-                byte[] interpolation = reader.ReadBytes(24);
+                ReadExactly(reader, interpolation);
                 Array.Copy(interpolation, key.Interpolation, interpolation.Length);
                 key.ViewAngle = reader.ReadUInt32();
                 key.Perspective = reader.ReadByte() == 0;
@@ -138,7 +144,8 @@ namespace VRChat.MmdPreview.Pmx2Fbx
             }
         }
 
-        private static void ReadIkFrames(BinaryReader reader, Stream stream, Encoding encoding, VmdMotion motion)
+        private static void ReadIkFrames(BinaryReader reader, Stream stream,
+            FixedStringCache names, VmdMotion motion)
         {
             uint count = ReadCount(reader, stream, "IK");
             motion.IkKeyframes.Capacity = CheckedCapacity(count);
@@ -156,7 +163,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx
                     EnsureRemaining(stream, 21, "IK state");
                     key.States.Add(new VmdIkState
                     {
-                        Name = ReadFixedString(reader, stream, 20, encoding, "IK name"),
+                        Name = names.Read(reader, stream, 20, "IK name"),
                         Enabled = reader.ReadByte() != 0
                     });
                 }
@@ -211,6 +218,97 @@ namespace VRChat.MmdPreview.Pmx2Fbx
             return encoding.GetString(bytes, 0, zero);
         }
 
+        private static void ReadExactly(BinaryReader reader, byte[] buffer)
+        {
+            int offset = 0;
+            while (offset < buffer.Length)
+            {
+                int read = reader.Read(buffer, offset, buffer.Length - offset);
+                if (read <= 0) throw new EndOfStreamException();
+                offset += read;
+            }
+        }
+
+        private readonly struct FixedByteKey : IEquatable<FixedByteKey>
+        {
+            private readonly ulong _first;
+            private readonly ulong _second;
+            private readonly ulong _third;
+            private readonly int _length;
+
+            internal FixedByteKey(byte[] bytes, int length)
+            {
+                _first = Pack(bytes, 0, Math.Min(8, length));
+                _second = Pack(bytes, 8, Math.Min(8, Math.Max(0, length - 8)));
+                _third = Pack(bytes, 16, Math.Min(8, Math.Max(0, length - 16)));
+                _length = length;
+            }
+
+            public bool Equals(FixedByteKey other)
+            {
+                return _length == other._length && _first == other._first &&
+                       _second == other._second && _third == other._third;
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is FixedByteKey other && Equals(other);
+            }
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    int hash = _length;
+                    hash = hash * 397 ^ _first.GetHashCode();
+                    hash = hash * 397 ^ _second.GetHashCode();
+                    return hash * 397 ^ _third.GetHashCode();
+                }
+            }
+
+            private static ulong Pack(byte[] bytes, int offset, int count)
+            {
+                ulong value = 0;
+                for (int index = 0; index < count; index++)
+                    value |= (ulong)bytes[offset + index] << (index * 8);
+                return value;
+            }
+        }
+
+        private sealed class FixedStringCache
+        {
+            private readonly byte[] _buffer;
+            private readonly Encoding _encoding;
+            private readonly Dictionary<FixedByteKey, string> _values =
+                new Dictionary<FixedByteKey, string>();
+
+            internal FixedStringCache(int maximumLength, Encoding encoding)
+            {
+                _buffer = new byte[maximumLength];
+                _encoding = encoding;
+            }
+
+            internal string Read(BinaryReader reader, Stream stream, int length, string section)
+            {
+                if (length > _buffer.Length) throw new ArgumentOutOfRangeException(nameof(length));
+                EnsureRemaining(stream, length, section);
+                int offset = 0;
+                while (offset < length)
+                {
+                    int read = reader.Read(_buffer, offset, length - offset);
+                    if (read <= 0) throw new EndOfStreamException();
+                    offset += read;
+                }
+                int count = Array.IndexOf(_buffer, (byte)0, 0, length);
+                if (count < 0) count = length;
+                var key = new FixedByteKey(_buffer, count);
+                if (_values.TryGetValue(key, out string value)) return value;
+                value = _encoding.GetString(_buffer, 0, count);
+                _values.Add(key, value);
+                return value;
+            }
+        }
+
         private static void EnsureRemaining(Stream stream, long byteCount, string section)
         {
             if (byteCount < 0 || stream.Length - stream.Position < byteCount)
@@ -235,4 +333,5 @@ namespace VRChat.MmdPreview.Pmx2Fbx
             return new Quaternion(value.x * inverse, value.y * inverse, value.z * inverse, value.w * inverse);
         }
     }
+
 }

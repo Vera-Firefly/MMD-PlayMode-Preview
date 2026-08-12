@@ -29,13 +29,18 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             private readonly PmxAnimationClipBakerOptions _options;
             private PmxHumanoidSourceRig _rig;
             private HumanPoseHandler _poseHandler;
+            private PmxTargetHumanoidSourceRig _targetHumanoidRig;
+            private int _targetHumanoidRootId;
+            private bool _disposed;
 
-            internal BatchSession(PmxModel model, PmxAnimationClipBakerOptions options)
+            internal BatchSession(PmxModel model, PmxAnimationClipBakerOptions options,
+                bool createHumanoidRig = true)
             {
                 _model = model ?? throw new ArgumentNullException(nameof(model));
                 _options = options ?? new PmxAnimationClipBakerOptions();
                 if (_options.SampleRate <= 0f || _options.SampleRate > 240f)
                     throw new ArgumentOutOfRangeException(nameof(options.SampleRate));
+                if (!createHumanoidRig) return;
 
                 try
                 {
@@ -71,7 +76,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                 Action<int, int> threadSafeProgress = null, CancellationToken cancellationToken = default)
             {
                 if (motion == null) throw new ArgumentNullException(nameof(motion));
-                if (_rig == null || _poseHandler == null)
+                if (_disposed)
                     throw new ObjectDisposedException(nameof(BatchSession));
                 return PrepareMotion(
                     _model, motion, _options, maximumParallelism, threadSafeProgress, cancellationToken);
@@ -86,17 +91,54 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                 return BakePrepared(_model, prepared, morphTargetRoot, _options, progress, _rig, _poseHandler);
             }
 
+            internal PmxAnimationBakeReport BakeTargetFk(PreparedMotion prepared, GameObject targetRoot,
+                PmxTargetFkBakeOptions fkOptions, Action<float, string> progress = null)
+            {
+                if (prepared == null) throw new ArgumentNullException(nameof(prepared));
+                if (targetRoot == null) throw new ArgumentNullException(nameof(targetRoot));
+                if (_disposed)
+                    throw new ObjectDisposedException(nameof(BatchSession));
+                return PmxTargetFkAnimationClipBaker.Bake(
+                    _model, prepared, targetRoot, _options, fkOptions, progress);
+            }
+
+            internal PmxAnimationBakeReport BakeTargetHumanoid(PreparedMotion prepared,
+                GameObject targetRoot, Action<float, string> progress = null)
+            {
+                if (prepared == null) throw new ArgumentNullException(nameof(prepared));
+                if (targetRoot == null) throw new ArgumentNullException(nameof(targetRoot));
+                if (_disposed) throw new ObjectDisposedException(nameof(BatchSession));
+                int targetId = targetRoot.GetInstanceID();
+                if (_targetHumanoidRig == null || _targetHumanoidRootId != targetId)
+                {
+                    if (_targetHumanoidRig != null) _targetHumanoidRig.Dispose();
+                    _targetHumanoidRig = null;
+                    _targetHumanoidRootId = 0;
+                    PmxTargetHumanoidSourceRig targetRig = PmxTargetHumanoidSourceRig.Create(
+                        _model, targetRoot, _options);
+                    _targetHumanoidRig = targetRig;
+                    _targetHumanoidRootId = targetId;
+                }
+                return PmxTargetHumanoidAnimationClipBaker.Bake(
+                    prepared, _options, _targetHumanoidRig, progress);
+            }
+
             public void Dispose()
             {
+                if (_disposed) return;
+                _disposed = true;
                 try
                 {
                     if (_poseHandler != null) _poseHandler.Dispose();
                 }
                 finally
                 {
+                    if (_targetHumanoidRig != null) _targetHumanoidRig.Dispose();
                     if (_rig != null) _rig.Dispose();
                     _poseHandler = null;
                     _rig = null;
+                    _targetHumanoidRig = null;
+                    _targetHumanoidRootId = 0;
                 }
             }
         }
@@ -158,7 +200,8 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                 (sample, _, worker) =>
                 {
                     float time = sample == sampleCount - 1 ? duration : sample / options.SampleRate;
-                    float vmdFrame = Mathf.Min(motion.MaximumFrame, time * 30f);
+                    float vmdFrame = CalculateVmdFrame(
+                        sample, sampleCount, options.SampleRate, motion.MaximumFrame);
                     PmxPose pose = worker.Evaluator.Evaluate(vmdFrame, worker.Pose);
                     samples[sample] = new PmxHumanoidPoseSample(pose);
                     int current = Interlocked.Increment(ref completed);
@@ -184,17 +227,18 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             float duration = prepared.Duration;
             int sampleCount = prepared.Samples.Length;
             report.SampleCount = sampleCount;
+            float[] sampleTimes = CreateSampleTimes(sampleCount, duration, options.SampleRate);
 
             var muscles = new FloatCurveAccumulator[HumanTrait.MuscleCount];
             for (int index = 0; index < muscles.Length; index++)
-                muscles[index] = new FloatCurveAccumulator(sampleCount);
-            var rootTx = new FloatCurveAccumulator(sampleCount);
-            var rootTy = new FloatCurveAccumulator(sampleCount);
-            var rootTz = new FloatCurveAccumulator(sampleCount);
-            var rootQx = new FloatCurveAccumulator(sampleCount);
-            var rootQy = new FloatCurveAccumulator(sampleCount);
-            var rootQz = new FloatCurveAccumulator(sampleCount);
-            var rootQw = new FloatCurveAccumulator(sampleCount);
+                muscles[index] = new FloatCurveAccumulator(sampleTimes);
+            var rootTx = new FloatCurveAccumulator(sampleTimes);
+            var rootTy = new FloatCurveAccumulator(sampleTimes);
+            var rootTz = new FloatCurveAccumulator(sampleTimes);
+            var rootQx = new FloatCurveAccumulator(sampleTimes);
+            var rootQy = new FloatCurveAccumulator(sampleTimes);
+            var rootQz = new FloatCurveAccumulator(sampleTimes);
+            var rootQw = new FloatCurveAccumulator(sampleTimes);
 
             var humanPose = new HumanPose();
             Quaternion previousBodyRotation = Quaternion.identity;
@@ -202,8 +246,8 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
 
             for (int sample = 0; sample < sampleCount; sample++)
             {
-                float time = sample == sampleCount - 1 ? duration : sample / options.SampleRate;
-                float vmdFrame = Mathf.Min(motion.MaximumFrame, time * 30f);
+                float vmdFrame = CalculateVmdFrame(
+                    sample, sampleCount, options.SampleRate, motion.MaximumFrame);
                 rig.Apply(prepared.Samples[sample], options.PositionScale);
                 poseHandler.GetHumanPose(ref humanPose);
 
@@ -218,18 +262,19 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                 previousBodyRotation = bodyRotation;
                 hasPreviousBodyRotation = true;
 
-                rootTx.Add(time, bodyPosition.x);
-                rootTy.Add(time, bodyPosition.y);
-                rootTz.Add(time, bodyPosition.z);
-                rootQx.Add(time, bodyRotation.x);
-                rootQy.Add(time, bodyRotation.y);
-                rootQz.Add(time, bodyRotation.z);
-                rootQw.Add(time, bodyRotation.w);
+                rootTx.Add(bodyPosition.x);
+                rootTy.Add(bodyPosition.y);
+                rootTz.Add(bodyPosition.z);
+                rootQx.Add(bodyRotation.x);
+                rootQy.Add(bodyRotation.y);
+                rootQz.Add(bodyRotation.z);
+                rootQw.Add(bodyRotation.w);
                 for (int muscle = 0; muscle < muscles.Length; muscle++)
-                    muscles[muscle].Add(time, humanPose.muscles[muscle]);
+                    muscles[muscle].Add(humanPose.muscles[muscle]);
 
-                progress?.Invoke(0.8f * (sample + 1f) / sampleCount,
-                    $"Baking Humanoid frame {sample + 1}/{sampleCount}");
+                if ((sample & 15) == 0 || sample + 1 == sampleCount)
+                    progress?.Invoke(0.8f * (sample + 1f) / sampleCount,
+                        $"Baking Humanoid frame {sample + 1}/{sampleCount}");
             }
 
             var clip = new AnimationClip
@@ -258,19 +303,21 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                     accumulator.ToArray(), options.CurveReductionError);
             });
 
-            WriteAnimatorCurve(clip, "RootT.x", optimizedKeys[0]);
-            WriteAnimatorCurve(clip, "RootT.y", optimizedKeys[1]);
-            WriteAnimatorCurve(clip, "RootT.z", optimizedKeys[2]);
-            WriteAnimatorCurve(clip, "RootQ.x", optimizedKeys[3]);
-            WriteAnimatorCurve(clip, "RootQ.y", optimizedKeys[4]);
-            WriteAnimatorCurve(clip, "RootQ.z", optimizedKeys[5]);
-            WriteAnimatorCurve(clip, "RootQ.w", optimizedKeys[6]);
+            var properties = new string[optimizedKeys.Length];
+            properties[0] = "RootT.x";
+            properties[1] = "RootT.y";
+            properties[2] = "RootT.z";
+            properties[3] = "RootQ.x";
+            properties[4] = "RootQ.y";
+            properties[5] = "RootQ.z";
+            properties[6] = "RootQ.w";
             for (int muscle = 0; muscle < muscles.Length; muscle++)
             {
-                WriteAnimatorCurve(clip, GetAnimatorMusclePropertyName(muscle), optimizedKeys[7 + muscle]);
+                properties[7 + muscle] = GetAnimatorMusclePropertyName(muscle);
                 progress?.Invoke(0.82f + 0.12f * (muscle + 1f) / muscles.Length,
                     $"Optimizing Humanoid curves {muscle + 1}/{muscles.Length}");
             }
+            WriteAnimatorCurves(clip, properties, optimizedKeys);
 
             if (options.BakeMorphs && morphTargetRoot != null)
                 report.BoundMorphCount = PmxAnimationClipBaker.BakeMorphCurves(
@@ -302,15 +349,27 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             return report;
         }
 
-        private static void WriteAnimatorCurve(AnimationClip clip, string property, Keyframe[] keys)
+        internal static void WriteAnimatorCurves(AnimationClip clip,
+            IReadOnlyList<string> properties, IReadOnlyList<Keyframe[]> keys)
         {
-            if (string.IsNullOrEmpty(property) || keys == null) return;
-            AnimationUtility.SetEditorCurve(clip,
-                EditorCurveBinding.FloatCurve(string.Empty, typeof(Animator), property),
-                new AnimationCurve(keys));
+            if (clip == null) throw new ArgumentNullException(nameof(clip));
+            if (properties == null) throw new ArgumentNullException(nameof(properties));
+            if (keys == null || properties.Count != keys.Count)
+                throw new ArgumentException("Animator curve properties and keys must have equal lengths.");
+            var bindings = new List<EditorCurveBinding>(properties.Count);
+            var curves = new List<AnimationCurve>(properties.Count);
+            for (int index = 0; index < properties.Count; index++)
+            {
+                if (string.IsNullOrEmpty(properties[index]) || keys[index] == null) continue;
+                bindings.Add(EditorCurveBinding.FloatCurve(
+                    string.Empty, typeof(Animator), properties[index]));
+                curves.Add(new AnimationCurve(keys[index]));
+            }
+            if (bindings.Count > 0)
+                AnimationUtility.SetEditorCurves(clip, bindings.ToArray(), curves.ToArray());
         }
 
-        private static string GetAnimatorMusclePropertyName(int muscleIndex)
+        internal static string GetAnimatorMusclePropertyName(int muscleIndex)
         {
             string muscleName = HumanTrait.MuscleName[muscleIndex];
             if (string.IsNullOrEmpty(muscleName)) return muscleName;
@@ -346,7 +405,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             return muscleName;
         }
 
-        private static void ValidateHumanPose(HumanPose pose, float frame)
+        internal static void ValidateHumanPose(HumanPose pose, float frame)
         {
             if (!IsFinite(pose.bodyPosition.x) || !IsFinite(pose.bodyPosition.y) ||
                 !IsFinite(pose.bodyPosition.z) || !IsFinite(pose.bodyRotation.x) ||
@@ -361,12 +420,30 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                         $"Humanoid muscle {index} became non-finite at VMD frame {frame}.");
         }
 
+        internal static float CalculateVmdFrame(int sampleIndex, int sampleCount,
+            float sampleRate, uint maximumFrame)
+        {
+            if (sampleIndex == sampleCount - 1) return maximumFrame;
+            if (Mathf.Abs(sampleRate - 30f) <= 1e-6f)
+                return Mathf.Min(maximumFrame, sampleIndex);
+            float time = sampleIndex / sampleRate;
+            return Mathf.Min(maximumFrame, time * 30f);
+        }
+
+        internal static float[] CreateSampleTimes(int sampleCount, float duration, float sampleRate)
+        {
+            var result = new float[sampleCount];
+            for (int sample = 0; sample < sampleCount; sample++)
+                result[sample] = sample == sampleCount - 1 ? duration : sample / sampleRate;
+            return result;
+        }
+
         private static bool IsFinite(float value)
         {
             return !float.IsNaN(value) && !float.IsInfinity(value);
         }
 
-        private static Vector3 ConvertHumanoidRootPosition(Vector3 value, PmxCoordinateConversion target)
+        internal static Vector3 ConvertHumanoidRootPosition(Vector3 value, PmxCoordinateConversion target)
         {
             // The Humanoid proxy always uses a 180-degree Y source basis so semantic left/right
             // and forward match Unity. Convert its root back to the requested clip coordinate basis.
@@ -383,7 +460,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             }
         }
 
-        private static Quaternion ConvertHumanoidRootRotation(Quaternion value,
+        internal static Quaternion ConvertHumanoidRootRotation(Quaternion value,
             PmxCoordinateConversion target)
         {
             switch (target)
@@ -402,25 +479,23 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             }
         }
 
-        private sealed class FloatCurveAccumulator
+        internal sealed class FloatCurveAccumulator
         {
             private readonly float[] _times;
             private readonly float[] _values;
             private int _count;
             private float _maximumAbsoluteValue;
 
-            internal FloatCurveAccumulator(int capacity)
+            internal FloatCurveAccumulator(float[] sharedTimes)
             {
-                int length = Math.Max(0, capacity);
-                _times = new float[length];
-                _values = new float[length];
+                _times = sharedTimes ?? throw new ArgumentNullException(nameof(sharedTimes));
+                _values = new float[sharedTimes.Length];
             }
 
-            internal void Add(float time, float value)
+            internal void Add(float value)
             {
                 if (_count >= _values.Length)
                     throw new InvalidOperationException("Humanoid curve sample capacity was exceeded.");
-                _times[_count] = time;
                 _values[_count] = value;
                 _count++;
                 _maximumAbsoluteValue = Mathf.Max(_maximumAbsoluteValue, Mathf.Abs(value));
@@ -461,7 +536,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
 
     internal sealed class PmxHumanoidSourceRig : IDisposable
     {
-        private sealed class HumanBoneRule
+        internal sealed class HumanBoneRule
         {
             internal readonly HumanBodyBones HumanBone;
             internal readonly string[] Candidates;
@@ -473,7 +548,7 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             }
         }
 
-        private static readonly HumanBoneRule[] HumanBoneRules =
+        internal static readonly HumanBoneRule[] HumanBoneRules =
         {
             // Standard MMD waist is the common ancestor of upper body and lower body/legs.
             // Mapping 下半身 directly would put Spine outside the Humanoid Hips hierarchy.
@@ -960,6 +1035,856 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
         private static HumanBoneRule Rule(HumanBodyBones bone, params string[] candidates)
         {
             return new HumanBoneRule(bone, candidates);
+        }
+    }
+
+    internal sealed class PmxTargetHumanoidSourceRig : IDisposable
+    {
+        private List<PmxTargetFkAnimationClipBaker.TargetBinding> _bindings;
+        private Transform[] _cloneTargets;
+        private PmxAnimationClipBakerOptions _sourceOptions;
+        private HumanPoseHandler _poseHandler;
+        private GameObject _cloneRoot;
+        private int _rootMotionSourceBoneIndex = -1;
+        private Vector3 _rootMotionSourceRestPosition;
+        private float _rootMotionTargetScale = 1f;
+        internal int BindingCount => _bindings != null ? _bindings.Count : 0;
+
+        private PmxTargetHumanoidSourceRig()
+        {
+        }
+
+        private void Build(PmxModel model, GameObject targetRoot,
+            PmxAnimationClipBakerOptions options)
+        {
+            if (model == null) throw new ArgumentNullException(nameof(model));
+            Animator animator = targetRoot != null
+                ? targetRoot.GetComponent<Animator>() ?? targetRoot.GetComponentInChildren<Animator>(true)
+                : null;
+            if (animator == null || animator.avatar == null || !animator.avatar.isValid ||
+                !animator.avatar.isHuman)
+                throw new InvalidOperationException(
+                    "Target-calibrated Humanoid output requires a valid Humanoid Animator.");
+
+            _bindings = PmxTargetFkAnimationClipBaker.BuildBindings(
+                model, animator.transform, animator);
+            if (!_bindings.Any(binding => binding.HumanBone == HumanBodyBones.Hips))
+                throw new InvalidOperationException(
+                    "The PMX and target Avatar must both provide a Hips/lower-body mapping.");
+
+            Dictionary<Transform, Transform> cloneMap = CloneHierarchy(
+                animator, out _cloneRoot);
+            _cloneTargets = new Transform[_bindings.Count];
+            for (int index = 0; index < _bindings.Count; index++)
+            {
+                PmxTargetFkAnimationClipBaker.TargetBinding binding = _bindings[index];
+                if (!cloneMap.TryGetValue(binding.Target, out Transform clone))
+                    throw new InvalidOperationException(
+                        "Could not reproduce the target Avatar skeleton path: " + binding.Path);
+                _cloneTargets[index] = clone;
+                binding.RootToParentVector = clone.parent != null
+                    ? clone.parent.worldToLocalMatrix * _cloneRoot.transform.localToWorldMatrix
+                    : Matrix4x4.identity;
+                if (binding.HumanBone == HumanBodyBones.Hips)
+                {
+                    _rootMotionSourceBoneIndex = FindRootMotionSourceBone(
+                        model, binding.SourceBoneIndex);
+                    _rootMotionSourceRestPosition =
+                        model.Bones[_rootMotionSourceBoneIndex].Position;
+                    float sourceReferenceHeight = Mathf.Abs(
+                        _rootMotionSourceRestPosition.y * options.PositionScale);
+                    float targetReferenceHeight = Mathf.Abs(
+                        clone.position.y - _cloneRoot.transform.position.y);
+                    if (sourceReferenceHeight > 1e-5f && targetReferenceHeight > 1e-5f)
+                        _rootMotionTargetScale = targetReferenceHeight / sourceReferenceHeight;
+                }
+            }
+            _sourceOptions = new PmxAnimationClipBakerOptions
+            {
+                PositionScale = options.PositionScale,
+                CoordinateConversion = PmxCoordinateConversion.RotateY180
+            };
+            _poseHandler = new HumanPoseHandler(animator.avatar, _cloneRoot.transform);
+        }
+
+        internal static PmxTargetHumanoidSourceRig Create(PmxModel model, GameObject targetRoot,
+            PmxAnimationClipBakerOptions options)
+        {
+            var rig = new PmxTargetHumanoidSourceRig();
+            try
+            {
+                rig.Build(model, targetRoot, options ?? new PmxAnimationClipBakerOptions());
+                return rig;
+            }
+            catch
+            {
+                rig.Dispose();
+                throw;
+            }
+        }
+
+        internal void Apply(PmxHumanoidPoseSample sample)
+        {
+            if (sample == null) throw new ArgumentNullException(nameof(sample));
+            if (_poseHandler == null) throw new ObjectDisposedException(nameof(PmxTargetHumanoidSourceRig));
+            for (int index = 0; index < _bindings.Count; index++)
+            {
+                PmxTargetFkAnimationClipBaker.TargetBinding binding = _bindings[index];
+                Transform target = _cloneTargets[index];
+                bool suppressMmdWaistCancellation =
+                    binding.HumanBone == HumanBodyBones.LeftUpperLeg ||
+                    binding.HumanBone == HumanBodyBones.RightUpperLeg;
+                target.localRotation = PmxTargetFkAnimationClipBaker.EvaluateLocalRotation(
+                    sample, _bindings, index, _sourceOptions, suppressMmdWaistCancellation);
+                if (binding.HumanBone == HumanBodyBones.Hips)
+                    target.localPosition = PmxTargetFkAnimationClipBaker.EvaluateRootLocalPosition(
+                        sample, binding, _rootMotionSourceBoneIndex,
+                        _rootMotionSourceRestPosition, _sourceOptions, _rootMotionTargetScale);
+            }
+        }
+
+        private static int FindRootMotionSourceBone(PmxModel model, int hipsSourceBoneIndex)
+        {
+            int current = hipsSourceBoneIndex;
+            while (current >= 0 && current < model.Bones.Count)
+            {
+                PmxBone bone = model.Bones[current];
+                if (string.Equals(bone.NameJapanese, "\u8170", StringComparison.Ordinal) ||
+                    string.Equals(bone.NameEnglish, "waist", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(bone.NameEnglish, "hips", StringComparison.OrdinalIgnoreCase))
+                    return current;
+                current = bone.ParentIndex;
+            }
+            return hipsSourceBoneIndex;
+        }
+
+        internal void GetHumanPose(ref HumanPose pose)
+        {
+            if (_poseHandler == null) throw new ObjectDisposedException(nameof(PmxTargetHumanoidSourceRig));
+            _poseHandler.GetHumanPose(ref pose);
+        }
+
+        public void Dispose()
+        {
+            if (_poseHandler != null) _poseHandler.Dispose();
+            if (_cloneRoot != null) UnityEngine.Object.DestroyImmediate(_cloneRoot);
+            _poseHandler = null;
+            _cloneRoot = null;
+        }
+
+        private static Dictionary<Transform, Transform> CloneHierarchy(Animator animator,
+            out GameObject cloneRoot)
+        {
+            Transform sourceRoot = animator.transform;
+            cloneRoot = new GameObject(sourceRoot.name)
+            {
+                hideFlags = HideFlags.HideAndDontSave
+            };
+            cloneRoot.transform.localPosition = Vector3.zero;
+            cloneRoot.transform.localRotation = Quaternion.identity;
+            cloneRoot.transform.localScale = Vector3.one;
+            var result = new Dictionary<Transform, Transform>
+            {
+                [sourceRoot] = cloneRoot.transform
+            };
+            Dictionary<string, SkeletonBone> skeleton =
+                PmxTargetFkAnimationClipBaker.BuildSkeletonLookup(animator.avatar);
+            HashSet<Transform> required = BuildRequiredTransforms(animator, skeleton);
+            CloneChildren(sourceRoot, cloneRoot.transform, skeleton, required, result);
+            return result;
+        }
+
+        private static HashSet<Transform> BuildRequiredTransforms(Animator animator,
+            IReadOnlyDictionary<string, SkeletonBone> skeleton)
+        {
+            Transform root = animator.transform;
+            var required = new HashSet<Transform> { root };
+            for (int index = 0; index < (int)HumanBodyBones.LastBone; index++)
+                AddWithAncestors(animator.GetBoneTransform((HumanBodyBones)index), root, required);
+            foreach (Transform transform in root.GetComponentsInChildren<Transform>(true))
+                if (skeleton.ContainsKey(transform.name))
+                    AddWithAncestors(transform, root, required);
+            return required;
+        }
+
+        private static void AddWithAncestors(Transform transform, Transform root,
+            ISet<Transform> required)
+        {
+            for (Transform current = transform; current != null; current = current.parent)
+            {
+                required.Add(current);
+                if (current == root) break;
+            }
+        }
+
+        private static void CloneChildren(Transform source, Transform cloneParent,
+            IReadOnlyDictionary<string, SkeletonBone> skeleton,
+            ISet<Transform> required,
+            IDictionary<Transform, Transform> result)
+        {
+            for (int index = 0; index < source.childCount; index++)
+            {
+                Transform child = source.GetChild(index);
+                if (!required.Contains(child)) continue;
+                var cloneObject = new GameObject(child.name)
+                {
+                    hideFlags = HideFlags.HideAndDontSave
+                };
+                Transform clone = cloneObject.transform;
+                clone.SetParent(cloneParent, false);
+                if (skeleton.TryGetValue(child.name, out SkeletonBone rest))
+                {
+                    clone.localPosition = rest.position;
+                    clone.localRotation = rest.rotation;
+                    clone.localScale = rest.scale;
+                }
+                else
+                {
+                    clone.localPosition = child.localPosition;
+                    clone.localRotation = child.localRotation;
+                    clone.localScale = child.localScale;
+                }
+                result[child] = clone;
+                CloneChildren(child, clone, skeleton, required, result);
+            }
+        }
+    }
+
+    internal static class PmxTargetHumanoidAnimationClipBaker
+    {
+        internal static PmxAnimationBakeReport Bake(
+            PmxHumanoidAnimationClipBaker.PreparedMotion prepared,
+            PmxAnimationClipBakerOptions options,
+            PmxTargetHumanoidSourceRig rig,
+            Action<float, string> progress = null)
+        {
+            if (prepared == null) throw new ArgumentNullException(nameof(prepared));
+            if (rig == null) throw new ArgumentNullException(nameof(rig));
+            options = options ?? new PmxAnimationClipBakerOptions();
+            int sampleCount = prepared.Samples.Length;
+            float[] sampleTimes = PmxHumanoidAnimationClipBaker.CreateSampleTimes(
+                sampleCount, prepared.Duration, options.SampleRate);
+            var muscles = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator[HumanTrait.MuscleCount];
+            for (int index = 0; index < muscles.Length; index++)
+                muscles[index] = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator(sampleTimes);
+            var rootTx = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator(sampleTimes);
+            var rootTy = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator(sampleTimes);
+            var rootTz = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator(sampleTimes);
+            var rootQx = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator(sampleTimes);
+            var rootQy = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator(sampleTimes);
+            var rootQz = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator(sampleTimes);
+            var rootQw = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator(sampleTimes);
+            var humanPose = new HumanPose();
+            Quaternion previousBodyRotation = Quaternion.identity;
+            bool hasPreviousBodyRotation = false;
+
+            for (int sample = 0; sample < sampleCount; sample++)
+            {
+                float vmdFrame = PmxHumanoidAnimationClipBaker.CalculateVmdFrame(
+                    sample, sampleCount, options.SampleRate,
+                    prepared.Motion.MaximumFrame);
+                rig.Apply(prepared.Samples[sample]);
+                rig.GetHumanPose(ref humanPose);
+                PmxHumanoidAnimationClipBaker.ValidateHumanPose(humanPose, vmdFrame);
+                Vector3 bodyPosition = PmxHumanoidAnimationClipBaker.ConvertHumanoidRootPosition(
+                    humanPose.bodyPosition, options.CoordinateConversion);
+                Quaternion bodyRotation = PmxHumanoidAnimationClipBaker.ConvertHumanoidRootRotation(
+                    humanPose.bodyRotation, options.CoordinateConversion);
+                if (hasPreviousBodyRotation && Quaternion.Dot(previousBodyRotation, bodyRotation) < 0f)
+                    bodyRotation = new Quaternion(
+                        -bodyRotation.x, -bodyRotation.y, -bodyRotation.z, -bodyRotation.w);
+                previousBodyRotation = bodyRotation;
+                hasPreviousBodyRotation = true;
+
+                rootTx.Add(bodyPosition.x);
+                rootTy.Add(bodyPosition.y);
+                rootTz.Add(bodyPosition.z);
+                rootQx.Add(bodyRotation.x);
+                rootQy.Add(bodyRotation.y);
+                rootQz.Add(bodyRotation.z);
+                rootQw.Add(bodyRotation.w);
+                for (int muscle = 0; muscle < muscles.Length; muscle++)
+                    muscles[muscle].Add(humanPose.muscles[muscle]);
+                if ((sample & 15) == 0 || sample + 1 == sampleCount)
+                    progress?.Invoke(0.8f * (sample + 1f) / Mathf.Max(1, sampleCount),
+                        $"Calibrating Humanoid frame {sample + 1}/{sampleCount}");
+            }
+
+            var clip = new AnimationClip
+            {
+                name = string.IsNullOrEmpty(prepared.Motion.ModelName)
+                    ? "MMD Target-calibrated Humanoid Motion"
+                    : prepared.Motion.ModelName,
+                frameRate = options.SampleRate,
+                legacy = false
+            };
+            var accumulators = new PmxHumanoidAnimationClipBaker.FloatCurveAccumulator[7 + muscles.Length];
+            accumulators[0] = rootTx;
+            accumulators[1] = rootTy;
+            accumulators[2] = rootTz;
+            accumulators[3] = rootQx;
+            accumulators[4] = rootQy;
+            accumulators[5] = rootQz;
+            accumulators[6] = rootQw;
+            Array.Copy(muscles, 0, accumulators, 7, muscles.Length);
+            var optimizedKeys = new Keyframe[accumulators.Length][];
+            Parallel.For(0, accumulators.Length, index =>
+            {
+                bool keepConstant = index < 7;
+                PmxHumanoidAnimationClipBaker.FloatCurveAccumulator accumulator = accumulators[index];
+                if (!keepConstant && accumulator.IsApproximatelyZero()) return;
+                optimizedKeys[index] = PmxAnimationClipBaker.CreateLinearKeys(
+                    accumulator.ToArray(), options.CurveReductionError);
+            });
+
+            var properties = new string[optimizedKeys.Length];
+            properties[0] = "RootT.x";
+            properties[1] = "RootT.y";
+            properties[2] = "RootT.z";
+            properties[3] = "RootQ.x";
+            properties[4] = "RootQ.y";
+            properties[5] = "RootQ.z";
+            properties[6] = "RootQ.w";
+            for (int muscle = 0; muscle < muscles.Length; muscle++)
+                properties[7 + muscle] =
+                    PmxHumanoidAnimationClipBaker.GetAnimatorMusclePropertyName(muscle);
+            PmxHumanoidAnimationClipBaker.WriteAnimatorCurves(clip, properties, optimizedKeys);
+            clip.EnsureQuaternionContinuity();
+            progress?.Invoke(0.95f, "Finalizing target-calibrated Humanoid animation");
+            return new PmxAnimationBakeReport
+            {
+                Clip = clip,
+                BoundBoneCount = rig.BindingCount,
+                SampleCount = sampleCount
+            };
+        }
+
+        internal static PmxAnimationBakeReport BakeToAsset(string pmxPath, string vmdPath,
+            GameObject targetRoot, string outputAssetPath,
+            PmxAnimationClipBakerOptions options = null, Action<float, string> progress = null)
+        {
+            if (targetRoot == null) throw new ArgumentNullException(nameof(targetRoot));
+            PmxAnimationClipBaker.ValidateAssetPath(outputAssetPath);
+            options = options ?? new PmxAnimationClipBakerOptions();
+            PmxModel model = PmxModelCache.Load(pmxPath);
+            VmdMotion motion = VmdParser.Parse(PmxAnimationClipBaker.ToPhysicalPath(vmdPath));
+            PmxAnimationBakeReport report;
+            using (var session = new PmxHumanoidAnimationClipBaker.BatchSession(model, options, false))
+            {
+                PmxHumanoidAnimationClipBaker.PreparedMotion prepared = session.Prepare(motion);
+                report = session.BakeTargetHumanoid(prepared, targetRoot, progress);
+            }
+            if (options.BakeMorphs)
+                report.BoundMorphCount = PmxAnimationClipBaker.BakeMorphCurves(
+                    report.Clip, motion, targetRoot.transform);
+            report.Clip.name = Path.GetFileNameWithoutExtension(outputAssetPath);
+            progress?.Invoke(0.96f, "Writing target-calibrated Humanoid AnimationClip asset");
+            AssetDatabase.DeleteAsset(outputAssetPath);
+            AssetDatabase.CreateAsset(report.Clip, outputAssetPath);
+            AssetDatabase.SaveAssets();
+            AssetDatabase.ImportAsset(outputAssetPath, ImportAssetOptions.ForceSynchronousImport);
+            report.Clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(outputAssetPath);
+            progress?.Invoke(1f, "Conversion complete");
+            return report;
+        }
+    }
+
+    [Serializable]
+    public sealed class PmxTargetFkBakeOptions
+    {
+        // Quaternion curves are reduced as a unit and measured in degrees.
+        public float RotationErrorDegrees = 0.01f;
+        // Root translation is reduced as a Vector3 and measured in Unity units.
+        public float PositionError = 0.00005f;
+        public bool BakeRootTranslation = true;
+    }
+
+    public static class PmxTargetFkAnimationClipBaker
+    {
+        internal sealed class TargetBinding
+        {
+            internal HumanBodyBones HumanBone;
+            internal int SourceBoneIndex;
+            internal Transform Target;
+            internal string Path;
+            internal Quaternion RestLocalRotation;
+            internal Quaternion RestWorldRotation;
+            internal Quaternion RestParentWorldRotation;
+            internal Vector3 RestLocalPosition;
+            internal Matrix4x4 RootToParentVector;
+            internal int ParentBindingIndex = -1;
+        }
+
+        private sealed class TargetCurveData
+        {
+            internal string Path;
+            internal Keyframe[][] Rotation;
+            internal Keyframe[][] Position;
+        }
+
+        internal static PmxAnimationBakeReport Bake(PmxModel model,
+            PmxHumanoidAnimationClipBaker.PreparedMotion prepared, GameObject targetRoot,
+            PmxAnimationClipBakerOptions options, PmxTargetFkBakeOptions fkOptions,
+            Action<float, string> progress = null)
+        {
+            if (model == null) throw new ArgumentNullException(nameof(model));
+            if (prepared == null) throw new ArgumentNullException(nameof(prepared));
+            if (targetRoot == null) throw new ArgumentNullException(nameof(targetRoot));
+            options = options ?? new PmxAnimationClipBakerOptions();
+            fkOptions = fkOptions ?? new PmxTargetFkBakeOptions();
+
+            Animator animator = targetRoot.GetComponent<Animator>() ??
+                                targetRoot.GetComponentInChildren<Animator>(true);
+            if (animator == null || animator.avatar == null || !animator.avatar.isValid ||
+                !animator.avatar.isHuman)
+                throw new InvalidOperationException(
+                    "Target-model FK fidelity output requires a valid Humanoid Animator.");
+
+            List<TargetBinding> bindings = BuildBindings(model, targetRoot.transform, animator);
+            if (!bindings.Any(binding => binding.HumanBone == HumanBodyBones.Hips))
+                throw new InvalidOperationException(
+                    "The PMX and target Avatar must both provide a Hips/lower-body mapping.");
+
+            int sampleCount = prepared.Samples.Length;
+            var curveData = new TargetCurveData[bindings.Count];
+            var sampleTimes = new float[sampleCount];
+            for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+                sampleTimes[sampleIndex] = sampleIndex == sampleCount - 1
+                    ? prepared.Duration
+                    : sampleIndex / options.SampleRate;
+            progress?.Invoke(0f, "Preparing target-model FK curves");
+            Parallel.For(0, bindings.Count, bindingIndex =>
+            {
+                curveData[bindingIndex] = BuildCurves(
+                    model, prepared, sampleTimes, bindings, bindingIndex, options, fkOptions);
+            });
+
+            var clip = new AnimationClip
+            {
+                name = string.IsNullOrEmpty(prepared.Motion.ModelName)
+                    ? "MMD Target FK Motion"
+                    : prepared.Motion.ModelName,
+                frameRate = options.SampleRate,
+                legacy = false
+            };
+
+            int animatedBoneCount = 0;
+            for (int index = 0; index < curveData.Length; index++)
+            {
+                TargetCurveData data = curveData[index];
+                if (data == null) continue;
+                bool wrote = WriteVectorCurves(clip, data.Path, "m_LocalPosition", data.Position);
+                wrote |= WriteQuaternionCurves(clip, data.Path, data.Rotation);
+                if (wrote) animatedBoneCount++;
+                progress?.Invoke(
+                    0.75f + 0.18f * (index + 1f) / Mathf.Max(1, curveData.Length),
+                    $"Writing target FK curves {index + 1}/{curveData.Length}");
+            }
+
+            var report = new PmxAnimationBakeReport
+            {
+                Clip = clip,
+                BoundBoneCount = animatedBoneCount,
+                SampleCount = sampleCount
+            };
+            if (options.BakeMorphs)
+                report.BoundMorphCount = PmxAnimationClipBaker.BakeMorphCurves(
+                    clip, prepared.Motion, targetRoot.transform);
+            clip.EnsureQuaternionContinuity();
+            progress?.Invoke(0.95f, "Finalizing target-model FK animation");
+            return report;
+        }
+
+        public static PmxAnimationBakeReport BakeToAsset(string pmxPath, string vmdPath,
+            GameObject targetRoot, string outputAssetPath,
+            PmxAnimationClipBakerOptions options = null, PmxTargetFkBakeOptions fkOptions = null,
+            Action<float, string> progress = null)
+        {
+            PmxAnimationClipBaker.ValidateAssetPath(outputAssetPath);
+            options = options ?? new PmxAnimationClipBakerOptions();
+            PmxModel model = PmxModelCache.Load(pmxPath);
+            VmdMotion motion = VmdParser.Parse(PmxAnimationClipBaker.ToPhysicalPath(vmdPath));
+            PmxAnimationBakeReport report;
+            using (var session = new PmxHumanoidAnimationClipBaker.BatchSession(model, options, false))
+            {
+                PmxHumanoidAnimationClipBaker.PreparedMotion prepared = session.Prepare(motion);
+                report = session.BakeTargetFk(prepared, targetRoot, fkOptions, progress);
+            }
+            report.Clip.name = Path.GetFileNameWithoutExtension(outputAssetPath);
+            progress?.Invoke(0.96f, "Writing target FK AnimationClip asset");
+            AssetDatabase.DeleteAsset(outputAssetPath);
+            AssetDatabase.CreateAsset(report.Clip, outputAssetPath);
+            AssetDatabase.SaveAssets();
+            AssetDatabase.ImportAsset(outputAssetPath, ImportAssetOptions.ForceSynchronousImport);
+            report.Clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(outputAssetPath);
+            progress?.Invoke(1f, "Conversion complete");
+            return report;
+        }
+
+        internal static List<TargetBinding> BuildBindings(PmxModel model, Transform targetRoot,
+            Animator animator)
+        {
+            Dictionary<string, SkeletonBone> skeleton = BuildSkeletonLookup(animator.avatar);
+            var restWorldRotations = new Dictionary<Transform, Quaternion>();
+            var result = new List<TargetBinding>();
+            var usedSources = new HashSet<int>();
+            var usedTargets = new HashSet<Transform>();
+
+            foreach (PmxHumanoidSourceRig.HumanBoneRule rule in PmxHumanoidSourceRig.HumanBoneRules)
+            {
+                Transform target = animator.GetBoneTransform(rule.HumanBone);
+                if (target == null || !target.IsChildOf(targetRoot) || !usedTargets.Add(target)) continue;
+                int sourceIndex = FindSourceBone(model, rule.Candidates, usedSources);
+                if (sourceIndex < 0) continue;
+                usedSources.Add(sourceIndex);
+
+                Quaternion restLocalRotation = skeleton.TryGetValue(target.name, out SkeletonBone restBone)
+                    ? restBone.rotation
+                    : target.localRotation;
+                Vector3 restLocalPosition = skeleton.TryGetValue(target.name, out restBone)
+                    ? restBone.position
+                    : target.localPosition;
+                Quaternion restWorldRotation = GetRestWorldRotation(
+                    target, targetRoot, skeleton, restWorldRotations);
+                Quaternion restParentWorldRotation = target.parent != null
+                    ? GetRestWorldRotation(target.parent, targetRoot, skeleton, restWorldRotations)
+                    : Quaternion.identity;
+                Matrix4x4 rootToParent = target.parent != null
+                    ? target.parent.worldToLocalMatrix * targetRoot.localToWorldMatrix
+                    : Matrix4x4.identity;
+
+                result.Add(new TargetBinding
+                {
+                    HumanBone = rule.HumanBone,
+                    SourceBoneIndex = sourceIndex,
+                    Target = target,
+                    Path = AnimationUtility.CalculateTransformPath(target, targetRoot),
+                    RestLocalRotation = PmxAnimationClipBaker.NormalizeSafe(restLocalRotation),
+                    RestWorldRotation = PmxAnimationClipBaker.NormalizeSafe(restWorldRotation),
+                    RestParentWorldRotation = PmxAnimationClipBaker.NormalizeSafe(restParentWorldRotation),
+                    RestLocalPosition = restLocalPosition,
+                    RootToParentVector = rootToParent
+                });
+            }
+
+            var byTarget = new Dictionary<Transform, int>();
+            for (int index = 0; index < result.Count; index++) byTarget[result[index].Target] = index;
+            for (int index = 0; index < result.Count; index++)
+            {
+                for (Transform parent = result[index].Target.parent;
+                     parent != null && parent != targetRoot;
+                     parent = parent.parent)
+                {
+                    if (!byTarget.TryGetValue(parent, out int parentIndex)) continue;
+                    result[index].ParentBindingIndex = parentIndex;
+                    break;
+                }
+            }
+            return result;
+        }
+
+        private static TargetCurveData BuildCurves(PmxModel model,
+            PmxHumanoidAnimationClipBaker.PreparedMotion prepared,
+            float[] times,
+            IReadOnlyList<TargetBinding> bindings, int bindingIndex,
+            PmxAnimationClipBakerOptions options, PmxTargetFkBakeOptions fkOptions)
+        {
+            TargetBinding binding = bindings[bindingIndex];
+            int count = prepared.Samples.Length;
+            var rotations = new Quaternion[count];
+            Vector3[] positions = binding.HumanBone == HumanBodyBones.Hips && fkOptions.BakeRootTranslation
+                ? new Vector3[count]
+                : null;
+            Quaternion previous = Quaternion.identity;
+            bool hasPrevious = false;
+            Vector3 sourceRestPosition = model.Bones[binding.SourceBoneIndex].Position;
+
+            for (int sampleIndex = 0; sampleIndex < count; sampleIndex++)
+            {
+                PmxHumanoidPoseSample sample = prepared.Samples[sampleIndex];
+                Quaternion local = EvaluateLocalRotation(sample, bindings, bindingIndex, options);
+                if (hasPrevious && Quaternion.Dot(previous, local) < 0f)
+                    local = new Quaternion(-local.x, -local.y, -local.z, -local.w);
+                rotations[sampleIndex] = local;
+                previous = local;
+                hasPrevious = true;
+
+                if (positions == null) continue;
+                positions[sampleIndex] = EvaluateRootLocalPosition(
+                    sample, binding, sourceRestPosition, options);
+            }
+
+            Keyframe[][] rotationCurves = BuildQuaternionCurves(
+                times, rotations, binding.RestLocalRotation,
+                Mathf.Max(0f, fkOptions.RotationErrorDegrees));
+            Keyframe[][] positionCurves = positions != null
+                ? BuildVectorCurves(times, positions, binding.RestLocalPosition,
+                    Mathf.Max(0f, fkOptions.PositionError))
+                : null;
+            return rotationCurves == null && positionCurves == null
+                ? null
+                : new TargetCurveData
+                {
+                    Path = binding.Path,
+                    Rotation = rotationCurves,
+                    Position = positionCurves
+                };
+        }
+
+        private static Keyframe[][] BuildQuaternionCurves(float[] times, Quaternion[] values,
+            Quaternion rest, float maximumErrorDegrees)
+        {
+            if (values.Length == 0) return null;
+            bool differsFromRest = false;
+            bool changes = false;
+            for (int index = 0; index < values.Length; index++)
+            {
+                differsFromRest |= Quaternion.Angle(rest, values[index]) > 0.00001f;
+                if (index > 0) changes |= Quaternion.Angle(values[0], values[index]) > 0.00001f;
+            }
+            if (!differsFromRest) return null;
+            int[] kept = changes
+                ? ReduceQuaternionSamples(times, values, maximumErrorDegrees)
+                : new[] { 0 };
+            var result = new Keyframe[4][];
+            for (int component = 0; component < 4; component++)
+            {
+                var keys = new Keyframe[kept.Length];
+                for (int keyIndex = 0; keyIndex < kept.Length; keyIndex++)
+                {
+                    int source = kept[keyIndex];
+                    Quaternion value = values[source];
+                    float componentValue = component == 0 ? value.x :
+                        component == 1 ? value.y : component == 2 ? value.z : value.w;
+                    keys[keyIndex] = new Keyframe(times[source], componentValue);
+                }
+                result[component] = PmxAnimationClipBaker.CreateLinearKeys(keys);
+            }
+            return result;
+        }
+
+        private static Keyframe[][] BuildVectorCurves(float[] times, Vector3[] values,
+            Vector3 rest, float maximumError)
+        {
+            if (values.Length == 0) return null;
+            bool differsFromRest = false;
+            bool changes = false;
+            for (int index = 0; index < values.Length; index++)
+            {
+                differsFromRest |= (values[index] - rest).sqrMagnitude > 1e-14f;
+                if (index > 0) changes |= (values[index] - values[0]).sqrMagnitude > 1e-14f;
+            }
+            if (!differsFromRest) return null;
+            int[] kept = changes ? ReduceVectorSamples(times, values, maximumError) : new[] { 0 };
+            var result = new Keyframe[3][];
+            for (int component = 0; component < 3; component++)
+            {
+                var keys = new Keyframe[kept.Length];
+                for (int keyIndex = 0; keyIndex < kept.Length; keyIndex++)
+                {
+                    int source = kept[keyIndex];
+                    Vector3 value = values[source];
+                    keys[keyIndex] = new Keyframe(
+                        times[source], component == 0 ? value.x : component == 1 ? value.y : value.z);
+                }
+                result[component] = PmxAnimationClipBaker.CreateLinearKeys(keys);
+            }
+            return result;
+        }
+
+        private static int[] ReduceQuaternionSamples(float[] times, Quaternion[] values,
+            float maximumErrorDegrees)
+        {
+            if (values.Length <= 2 || maximumErrorDegrees <= 0f)
+                return Enumerable.Range(0, values.Length).ToArray();
+            return ReduceSamples(times, values.Length, (start, end, index) =>
+            {
+                float factor = GetFactor(times, start, end, index);
+                Quaternion expected = Quaternion.LerpUnclamped(values[start], values[end], factor);
+                return Quaternion.Angle(expected, values[index]);
+            }, maximumErrorDegrees);
+        }
+
+        private static int[] ReduceVectorSamples(float[] times, Vector3[] values, float maximumError)
+        {
+            if (values.Length <= 2 || maximumError <= 0f)
+                return Enumerable.Range(0, values.Length).ToArray();
+            return ReduceSamples(times, values.Length, (start, end, index) =>
+            {
+                float factor = GetFactor(times, start, end, index);
+                return (Vector3.LerpUnclamped(values[start], values[end], factor) - values[index]).magnitude;
+            }, maximumError);
+        }
+
+        private static int[] ReduceSamples(float[] times, int count,
+            Func<int, int, int, float> getError, float maximumError)
+        {
+            var keep = new bool[count];
+            keep[0] = true;
+            keep[count - 1] = true;
+            var ranges = new Stack<int>();
+            ranges.Push(0);
+            ranges.Push(count - 1);
+            while (ranges.Count > 0)
+            {
+                int end = ranges.Pop();
+                int start = ranges.Pop();
+                float largest = -1f;
+                int split = -1;
+                for (int index = start + 1; index < end; index++)
+                {
+                    float error = getError(start, end, index);
+                    if (error <= largest) continue;
+                    largest = error;
+                    split = index;
+                }
+                if (split < 0 || largest <= maximumError) continue;
+                keep[split] = true;
+                ranges.Push(start);
+                ranges.Push(split);
+                ranges.Push(split);
+                ranges.Push(end);
+            }
+            var result = new List<int>();
+            for (int index = 0; index < count; index++) if (keep[index]) result.Add(index);
+            return result.ToArray();
+        }
+
+        private static float GetFactor(float[] times, int start, int end, int index)
+        {
+            float duration = times[end] - times[start];
+            return Mathf.Abs(duration) > 1e-12f ? (times[index] - times[start]) / duration : 0f;
+        }
+
+        private static bool WriteQuaternionCurves(AnimationClip clip, string path, Keyframe[][] curves)
+        {
+            if (curves == null) return false;
+            string[] properties =
+            {
+                "m_LocalRotation.x", "m_LocalRotation.y", "m_LocalRotation.z", "m_LocalRotation.w"
+            };
+            for (int index = 0; index < properties.Length; index++)
+                AnimationUtility.SetEditorCurve(clip,
+                    EditorCurveBinding.FloatCurve(path, typeof(Transform), properties[index]),
+                    new AnimationCurve(curves[index]));
+            return true;
+        }
+
+        private static bool WriteVectorCurves(AnimationClip clip, string path, string property,
+            Keyframe[][] curves)
+        {
+            if (curves == null) return false;
+            for (int index = 0; index < 3; index++)
+                AnimationUtility.SetEditorCurve(clip,
+                    EditorCurveBinding.FloatCurve(
+                        path, typeof(Transform), property + "." + (index == 0 ? "x" : index == 1 ? "y" : "z")),
+                    new AnimationCurve(curves[index]));
+            return true;
+        }
+
+        internal static Quaternion EvaluateLocalRotation(PmxHumanoidPoseSample sample,
+            IReadOnlyList<TargetBinding> bindings, int bindingIndex,
+            PmxAnimationClipBakerOptions options,
+            bool suppressUnmappedParentRotation = false)
+        {
+            TargetBinding binding = bindings[bindingIndex];
+            Quaternion sourceWorld = PmxAnimationClipBaker.ConvertRotation(
+                sample.WorldRotations[binding.SourceBoneIndex], options);
+            Quaternion sourceParentWorld = Quaternion.identity;
+            if (binding.ParentBindingIndex >= 0)
+            {
+                TargetBinding parentBinding = bindings[binding.ParentBindingIndex];
+                sourceParentWorld = PmxAnimationClipBaker.ConvertRotation(
+                    sample.WorldRotations[parentBinding.SourceBoneIndex], options);
+            }
+            if (suppressUnmappedParentRotation && binding.ParentBindingIndex >= 0)
+            {
+                // Standard MMD waist rigs place a helper with -1 waist rotation
+                // between LowerBody and each upper leg. Reproducing that helper in
+                // Humanoid requires roughly 180 degrees of counter-twist in each hip
+                // during a turn, which lies far outside the muscle range. Preserve the
+                // leg's own FK rotation but let it inherit the Humanoid root rotation.
+                Quaternion sourceLocal = PmxAnimationClipBaker.ConvertRotation(
+                    sample.LocalRotations[binding.SourceBoneIndex], options);
+                sourceWorld = PmxAnimationClipBaker.NormalizeSafe(
+                    sourceParentWorld * sourceLocal);
+            }
+            // PMX rotations are evaluated in the source model/parent basis. Preserve
+            // that world-space motion on the target reference axes, then derive the
+            // local value against the animated mapped ancestor. Directly appending the
+            // relative PMX quaternion to RestLocalRotation rotates around the target's
+            // FBX-local axes instead, which is especially wrong for rigs whose hips and
+            // legs have 90/180-degree reference rotations.
+            Quaternion desiredWorld = PmxAnimationClipBaker.NormalizeSafe(
+                sourceWorld * binding.RestWorldRotation);
+            Quaternion desiredParentWorld = binding.RestParentWorldRotation;
+            if (binding.ParentBindingIndex >= 0)
+                desiredParentWorld = PmxAnimationClipBaker.NormalizeSafe(
+                    sourceParentWorld * binding.RestParentWorldRotation);
+            return PmxAnimationClipBaker.NormalizeSafe(
+                Quaternion.Inverse(desiredParentWorld) * desiredWorld);
+        }
+
+        internal static Vector3 EvaluateRootLocalPosition(PmxHumanoidPoseSample sample,
+            TargetBinding binding, Vector3 sourceRestPosition,
+            PmxAnimationClipBakerOptions options)
+        {
+            return EvaluateRootLocalPosition(sample, binding, binding.SourceBoneIndex,
+                sourceRestPosition, options, 1f);
+        }
+
+        internal static Vector3 EvaluateRootLocalPosition(PmxHumanoidPoseSample sample,
+            TargetBinding binding, int sourceBoneIndex, Vector3 sourceRestPosition,
+            PmxAnimationClipBakerOptions options, float targetScale)
+        {
+            Vector3 sourceDisplacement =
+                sample.WorldPositions[sourceBoneIndex] - sourceRestPosition;
+            Vector3 rootDisplacement = PmxAnimationClipBaker.ConvertPosition(
+                sourceDisplacement, options) * (options.PositionScale * targetScale);
+            return binding.RestLocalPosition +
+                   binding.RootToParentVector.MultiplyVector(rootDisplacement);
+        }
+
+        internal static int FindSourceBone(PmxModel model, IEnumerable<string> candidates,
+            ISet<int> usedSources)
+        {
+            foreach (string candidate in candidates)
+            {
+                int index = model.FindBone(candidate);
+                if (index >= 0 && (usedSources == null || !usedSources.Contains(index))) return index;
+            }
+            return -1;
+        }
+
+        internal static Dictionary<string, SkeletonBone> BuildSkeletonLookup(Avatar avatar)
+        {
+            var result = new Dictionary<string, SkeletonBone>(StringComparer.Ordinal);
+            try
+            {
+                foreach (SkeletonBone bone in avatar.humanDescription.skeleton)
+                    if (!string.IsNullOrEmpty(bone.name) && !result.ContainsKey(bone.name))
+                        result.Add(bone.name, bone);
+            }
+            catch (Exception)
+            {
+                // Scene-local transforms remain a valid fallback for generated or unusual Avatars.
+            }
+            return result;
+        }
+
+        private static Quaternion GetRestWorldRotation(Transform transform, Transform targetRoot,
+            IReadOnlyDictionary<string, SkeletonBone> skeleton,
+            IDictionary<Transform, Quaternion> cache)
+        {
+            if (transform == null || transform == targetRoot) return Quaternion.identity;
+            if (cache.TryGetValue(transform, out Quaternion cached)) return cached;
+            Quaternion parent = GetRestWorldRotation(transform.parent, targetRoot, skeleton, cache);
+            Quaternion local = skeleton.TryGetValue(transform.name, out SkeletonBone bone)
+                ? bone.rotation
+                : transform.localRotation;
+            Quaternion result = PmxAnimationClipBaker.NormalizeSafe(parent * local);
+            cache[transform] = result;
+            return result;
         }
     }
 }
