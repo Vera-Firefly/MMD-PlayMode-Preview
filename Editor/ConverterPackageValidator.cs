@@ -22,6 +22,14 @@ internal static class ConverterPackageValidator
         "Editor/ConverterPackageValidator.cs.meta"
     };
 
+    // Development-only sources may be omitted by Unity Package Exporter. They are accepted
+    // in a source checkout but are not part of the required release manifest.
+    private static readonly HashSet<string> OptionalDevelopmentFiles =
+        new HashSet<string>(StringComparer.Ordinal)
+        {
+            "Tools~/generate-reference-pmx.mjs"
+        };
+
     // One complete package manifest. There is intentionally no current/legacy split.
     private static readonly HashSet<string> PackageFiles = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -106,7 +114,6 @@ internal static class ConverterPackageValidator
         "Runtime/Pmx2Fbx/VPD.meta",
         "Runtime/Pmx2Fbx/VPD/VpdParser.cs",
         "Runtime/Pmx2Fbx/VPD/VpdParser.cs.meta",
-        "Tools~/generate-reference-pmx.mjs",
         "package.json",
         "package.json.meta"
     };
@@ -143,7 +150,8 @@ internal static class ConverterPackageValidator
             .ToArray();
 
         string[] unexpectedFiles = actualFiles
-            .Where(path => !PackageFiles.Contains(path))
+            .Where(path => !PackageFiles.Contains(path) &&
+                           !OptionalDevelopmentFiles.Contains(path))
             .ToArray();
         string[] missingFiles = PackageFiles
             .Where(path => !actualFiles.Contains(path, StringComparer.Ordinal))
@@ -162,7 +170,8 @@ internal static class ConverterPackageValidator
             return;
 
         lastReportedIssueSignature = issueSignature;
-        string message = BuildMessage(unexpectedFiles, missingFiles);
+        string message = BuildMessage(
+            unexpectedFiles, missingFiles, GetPackageVersion(packageRoot));
         Debug.LogError("[MMD Play Mode Preview] Package self-check failed.\n" + message);
 
         if (Application.isBatchMode)
@@ -302,6 +311,7 @@ internal static class ConverterPackageValidator
         {
             if (string.IsNullOrWhiteSpace(relativePath) ||
                 PackageFiles.Contains(relativePath) ||
+                OptionalDevelopmentFiles.Contains(relativePath) ||
                 ValidatorFiles.Contains(relativePath))
             {
                 continue;
@@ -395,7 +405,9 @@ internal static class ConverterPackageValidator
     private static void RemoveUnexpectedEmptyDirectories(string packageRoot)
     {
         var allowedDirectories = new HashSet<string>(StringComparer.Ordinal) { string.Empty };
-        foreach (string relativeFile in PackageFiles.Concat(ValidatorFiles))
+        foreach (string relativeFile in PackageFiles
+                     .Concat(OptionalDevelopmentFiles)
+                     .Concat(ValidatorFiles))
         {
             string directory = Path.GetDirectoryName(relativeFile.Replace('/', Path.DirectorySeparatorChar));
             while (!string.IsNullOrEmpty(directory))
@@ -528,7 +540,34 @@ internal static class ConverterPackageValidator
             .Replace('\\', '/');
     }
 
-    private static string BuildMessage(string[] unexpectedFiles, string[] missingFiles)
+    private static string GetPackageVersion(string packageRoot)
+    {
+        PackageInfo package = PackageInfo.FindForAssembly(typeof(ConverterPackageValidator).Assembly);
+        if (!string.IsNullOrWhiteSpace(package?.version))
+            return package.version;
+
+        try
+        {
+            string manifestPath = Path.Combine(packageRoot, "package.json");
+            if (File.Exists(manifestPath))
+            {
+                PackageManifest manifest = JsonUtility.FromJson<PackageManifest>(
+                    File.ReadAllText(manifestPath));
+                if (!string.IsNullOrWhiteSpace(manifest?.version))
+                    return manifest.version;
+            }
+        }
+        catch (Exception exception)
+        {
+            Debug.LogWarning(
+                "[MMD Play Mode Preview] Could not read package version: " + exception.Message);
+        }
+
+        return "Unknown";
+    }
+
+    private static string BuildMessage(
+        string[] unexpectedFiles, string[] missingFiles, string packageVersion)
     {
         var sections = new List<string>();
         if (unexpectedFiles.Length > 0)
@@ -546,7 +585,13 @@ internal static class ConverterPackageValidator
         }
 
         return string.Join("\n\n", sections) +
-               "\n\n请重新安装完整、未混入其他内容的 2.7.0 包。";
+               "\n\n请重新安装完整、未混入其他内容的 " + packageVersion + " 包。";
+    }
+
+    [Serializable]
+    private sealed class PackageManifest
+    {
+        public string version;
     }
 
     private static string FormatPaths(string[] paths)
