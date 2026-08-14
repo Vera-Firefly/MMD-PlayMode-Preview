@@ -115,6 +115,7 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
     {
         InvalidateMappingTargetCache();
         convertedMotionResourcesDirty = true;
+        ScanPipelineModels();
     }
 
     internal void OnDisable()
@@ -131,16 +132,26 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
     {
         Attach(context);
         if (pipelineModels == null) pipelineModels = new List<GameObject>();
+        EnsurePipelineModelsAreAlive();
         EnsureMotionVmdEntryState();
+        RemoveMissingMotionEntries();
+        if (motionModelAsset == null) motionModelAsset = null;
         if (convertedMotionEntries == null) convertedMotionEntries = new List<ConvertedMotionEntry>();
         pageScroll = EditorGUILayout.BeginScrollView(pageScroll);
-        DrawMotionConverter();
-        EditorGUILayout.EndScrollView();
+        try
+        {
+            DrawMotionConverter();
+        }
+        finally
+        {
+            EditorGUILayout.EndScrollView();
+        }
     }
 
     internal void DrawAction(ConverterWindowContext context)
     {
         Attach(context);
+        EnsurePipelineModelsAreAlive();
         EditorGUILayout.Space(8f);
         EnsureConvertedMotionResourcesLoaded();
         List<string> sourcePaths = GetVmdAssetPaths(motionVmdAssets);
@@ -355,6 +366,7 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
 
     private void DrawModelMappings()
     {
+        EnsurePipelineModelsAreAlive();
         if (pipelineModels.Count == 0)
         {
             EditorGUILayout.LabelField(
@@ -429,95 +441,101 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
         }
 
         Rect mappingBorder = EditorGUILayout.BeginVertical();
-        EditorGUILayout.Space(4f);
-        using (new EditorGUILayout.HorizontalScope())
+        try
         {
-            GUILayout.Space(6f);
-            using (new EditorGUILayout.VerticalScope())
+            EditorGUILayout.Space(4f);
+            using (new EditorGUILayout.HorizontalScope())
             {
-                EditorGUI.BeginChangeCheck();
-                float angle = EditorGUILayout.FloatField(
-                    L("姿势旋转角度", "Pose Rotation Angle", "ポーズ回転角度"),
-                    entry.Data.poseRotationAngle);
-                if (EditorGUI.EndChangeCheck())
+                GUILayout.Space(6f);
+                using (new EditorGUILayout.VerticalScope())
                 {
-                    entry.Data.poseRotationAngle = angle;
-                    if (!entry.IsTransient) EditorUtility.SetDirty(entry.Data);
-                }
-
-                string foldoutKey = entry.Path + "|" + modelHierarchyPath;
-                bool expanded = GetMappingFoldout(
-                    foldoutKey,
-                    convertedMotionEntries.Count == 1 || entryIndex == 0);
-                expanded = EditorGUILayout.Foldout(
-                    expanded,
-                    entry.DisplayName + L("-映射列表", "-Mapping List", "-マッピング一覧"),
-                    true);
-                SetMappingFoldout(foldoutKey, expanded);
-                if (expanded)
-                {
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        GUILayout.Label(L("源形态键", "Source Morph", "ソースモーフ"), EditorStyles.boldLabel);
-                        GUILayout.Label(L("模型形态键", "Model BlendShape", "モデルモーフ"), EditorStyles.boldLabel);
-                    }
-
-                    const int pageSize = 32;
-                    int mappingCount = modelMapping.mappings.Count;
-                    int pageCount = Mathf.Max(1, Mathf.CeilToInt(mappingCount / (float)pageSize));
-                    int pageIndex = Mathf.Clamp(GetMappingPageIndex(foldoutKey), 0, pageCount - 1);
-                    if (pageCount > 1)
-                    {
-                        using (new EditorGUILayout.HorizontalScope())
-                        {
-                            using (new EditorGUI.DisabledScope(pageIndex <= 0))
-                                if (GUILayout.Button("‹", GUILayout.Width(28f))) pageIndex--;
-                            GUILayout.FlexibleSpace();
-                            GUILayout.Label(
-                                $"{pageIndex + 1} / {pageCount}  ({mappingCount})",
-                                EditorStyles.centeredGreyMiniLabel);
-                            GUILayout.FlexibleSpace();
-                            using (new EditorGUI.DisabledScope(pageIndex >= pageCount - 1))
-                                if (GUILayout.Button("›", GUILayout.Width(28f))) pageIndex++;
-                        }
-                    }
-                    SetMappingPageIndex(foldoutKey, pageIndex);
-                    int firstVisible = pageIndex * pageSize;
-                    int lastVisible = Mathf.Min(mappingCount, firstVisible + pageSize);
                     EditorGUI.BeginChangeCheck();
-                    for (int mappingIndex = firstVisible; mappingIndex < lastVisible; mappingIndex++)
+                    float angle = EditorGUILayout.FloatField(
+                        L("姿势旋转角度", "Pose Rotation Angle", "ポーズ回転角度"),
+                        entry.Data.poseRotationAngle);
+                    if (EditorGUI.EndChangeCheck())
                     {
-                        VmdMotionConversionData.MorphMapping mapping = modelMapping.mappings[mappingIndex];
-                        string targetKey = GetBlendShapeTargetKey(mapping.target, mapping.targetPath);
-                        int currentIndex = targetIndices.TryGetValue(targetKey, out int foundIndex)
-                            ? foundIndex
-                            : 0;
+                        entry.Data.poseRotationAngle = angle;
+                        if (!entry.IsTransient) EditorUtility.SetDirty(entry.Data);
+                    }
+
+                    string foldoutKey = entry.Path + "|" + modelHierarchyPath;
+                    bool expanded = GetMappingFoldout(
+                        foldoutKey,
+                        convertedMotionEntries.Count == 1 || entryIndex == 0);
+                    expanded = EditorGUILayout.Foldout(
+                        expanded,
+                        entry.DisplayName + L("-映射列表", "-Mapping List", "-マッピング一覧"),
+                        true);
+                    SetMappingFoldout(foldoutKey, expanded);
+                    if (expanded)
+                    {
                         using (new EditorGUILayout.HorizontalScope())
                         {
-                            EditorGUILayout.LabelField(mapping.source, GUILayout.MinWidth(120f));
-                            int nextIndex = EditorGUILayout.Popup(currentIndex, targetLabels);
-                            if (nextIndex == currentIndex) continue;
-                            if (nextIndex <= 0)
+                            GUILayout.Label(L("源形态键", "Source Morph", "ソースモーフ"), EditorStyles.boldLabel);
+                            GUILayout.Label(L("模型形态键", "Model BlendShape", "モデルモーフ"), EditorStyles.boldLabel);
+                        }
+
+                        const int pageSize = 32;
+                        int mappingCount = modelMapping.mappings.Count;
+                        int pageCount = Mathf.Max(1, Mathf.CeilToInt(mappingCount / (float)pageSize));
+                        int pageIndex = Mathf.Clamp(GetMappingPageIndex(foldoutKey), 0, pageCount - 1);
+                        if (pageCount > 1)
+                        {
+                            using (new EditorGUILayout.HorizontalScope())
                             {
-                                mapping.target = string.Empty;
-                                mapping.targetPath = string.Empty;
-                            }
-                            else
-                            {
-                                VmdMotionConverter.BlendShapeTarget target = targets[nextIndex - 1];
-                                mapping.target = target.Name;
-                                mapping.targetPath = target.Path;
+                                using (new EditorGUI.DisabledScope(pageIndex <= 0))
+                                    if (GUILayout.Button("‹", GUILayout.Width(28f))) pageIndex--;
+                                GUILayout.FlexibleSpace();
+                                GUILayout.Label(
+                                    $"{pageIndex + 1} / {pageCount}  ({mappingCount})",
+                                    EditorStyles.centeredGreyMiniLabel);
+                                GUILayout.FlexibleSpace();
+                                using (new EditorGUI.DisabledScope(pageIndex >= pageCount - 1))
+                                    if (GUILayout.Button("›", GUILayout.Width(28f))) pageIndex++;
                             }
                         }
+                        SetMappingPageIndex(foldoutKey, pageIndex);
+                        int firstVisible = pageIndex * pageSize;
+                        int lastVisible = Mathf.Min(mappingCount, firstVisible + pageSize);
+                        EditorGUI.BeginChangeCheck();
+                        for (int mappingIndex = firstVisible; mappingIndex < lastVisible; mappingIndex++)
+                        {
+                            VmdMotionConversionData.MorphMapping mapping = modelMapping.mappings[mappingIndex];
+                            string targetKey = GetBlendShapeTargetKey(mapping.target, mapping.targetPath);
+                            int currentIndex = targetIndices.TryGetValue(targetKey, out int foundIndex)
+                                ? foundIndex
+                                : 0;
+                            using (new EditorGUILayout.HorizontalScope())
+                            {
+                                EditorGUILayout.LabelField(mapping.source, GUILayout.MinWidth(120f));
+                                int nextIndex = EditorGUILayout.Popup(currentIndex, targetLabels);
+                                if (nextIndex == currentIndex) continue;
+                                if (nextIndex <= 0)
+                                {
+                                    mapping.target = string.Empty;
+                                    mapping.targetPath = string.Empty;
+                                }
+                                else
+                                {
+                                    VmdMotionConverter.BlendShapeTarget target = targets[nextIndex - 1];
+                                    mapping.target = target.Name;
+                                    mapping.targetPath = target.Path;
+                                }
+                            }
+                        }
+                        if (EditorGUI.EndChangeCheck())
+                            if (!entry.IsTransient) EditorUtility.SetDirty(entry.Data);
                     }
-                    if (EditorGUI.EndChangeCheck())
-                        if (!entry.IsTransient) EditorUtility.SetDirty(entry.Data);
                 }
+                GUILayout.Space(6f);
             }
-            GUILayout.Space(6f);
+            EditorGUILayout.Space(4f);
         }
-        EditorGUILayout.Space(4f);
-        EditorGUILayout.EndVertical();
+        finally
+        {
+            EditorGUILayout.EndVertical();
+        }
         ConverterWindowGui.DrawOutline(mappingBorder);
         EditorGUILayout.Space(6f);
         return mappingCreated && !entry.IsTransient;
@@ -546,8 +564,10 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
                     GUILayout.Height(maxListHeight));
             }
 
-            for (int index = 0; index < motionVmdAssets.Count; index++)
+            try
             {
+                for (int index = 0; index < motionVmdAssets.Count; index++)
+                {
                 if (index > 0) ConverterWindowGui.DrawEntrySeparator();
                 DefaultAsset displayAsset = motionVmdAssets[index] != null
                     ? motionVmdAssets[index]
@@ -555,19 +575,25 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
                 Color entryColor = GetMotionEntryColor(index);
                 bool removeEntry = false;
                 Color previousContentColor = GUI.contentColor;
-                GUI.contentColor = entryColor;
-                using (new EditorGUILayout.HorizontalScope())
+                try
                 {
-                    string arrow = motionVmdFileFoldouts[index] ? "▼ " : "▶ ";
-                    if (GUILayout.Button(
-                            arrow + GetVmdDisplayName(displayAsset),
-                            EditorStyles.boldLabel,
-                            GUILayout.ExpandWidth(true)))
-                        motionVmdFileFoldouts[index] = !motionVmdFileFoldouts[index];
-                    removeEntry = GUILayout.Button(
-                        "×", EditorStyles.miniButton, GUILayout.Width(24f));
+                    GUI.contentColor = entryColor;
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        string arrow = motionVmdFileFoldouts[index] ? "▼ " : "▶ ";
+                        if (GUILayout.Button(
+                                arrow + GetVmdDisplayName(displayAsset),
+                                EditorStyles.boldLabel,
+                                GUILayout.ExpandWidth(true)))
+                            motionVmdFileFoldouts[index] = !motionVmdFileFoldouts[index];
+                        removeEntry = GUILayout.Button(
+                            "×", EditorStyles.miniButton, GUILayout.Width(24f));
+                    }
                 }
-                GUI.contentColor = previousContentColor;
+                finally
+                {
+                    GUI.contentColor = previousContentColor;
+                }
                 if (removeEntry)
                 {
                     motionVmdAssets.RemoveAt(index);
@@ -578,43 +604,50 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
                 }
                 if (!motionVmdFileFoldouts[index]) continue;
 
-                EditorGUI.indentLevel++;
-                if (DrawMotionVmdDataRow(
-                        L("动作数据", "Motion Data", "モーションデータ"),
-                        motionVmdAssets[index],
-                        out DefaultAsset nextMotion))
+                int previousIndentLevel = EditorGUI.indentLevel;
+                try
                 {
-                    string nextPath = GetVmdAssetPath(nextMotion);
-                    bool duplicate = !string.IsNullOrEmpty(nextPath) && motionVmdAssets
-                        .Where((_, otherIndex) => otherIndex != index)
-                        .Any(other => string.Equals(
-                            GetVmdAssetPath(other),
-                            nextPath,
-                            StringComparison.OrdinalIgnoreCase));
-                    if (duplicate)
+                    EditorGUI.indentLevel = previousIndentLevel + 1;
+                    if (DrawMotionVmdDataRow(
+                            L("动作数据", "Motion Data", "モーションデータ"),
+                            motionVmdAssets[index],
+                            out DefaultAsset nextMotion))
                     {
-                        ShowDialog(
-                            L("VMD文件", "VMD Files", "VMDファイル"),
-                            L("该动作VMD已在列表中。",
-                                "That motion VMD is already in the list.",
-                                "そのモーションVMDはすでにリストにあります。"));
+                        string nextPath = GetVmdAssetPath(nextMotion);
+                        bool duplicate = !string.IsNullOrEmpty(nextPath) && motionVmdAssets
+                            .Where((_, otherIndex) => otherIndex != index)
+                            .Any(other => string.Equals(
+                                GetVmdAssetPath(other),
+                                nextPath,
+                                StringComparison.OrdinalIgnoreCase));
+                        if (duplicate)
+                        {
+                            ShowDialog(
+                                L("VMD文件", "VMD Files", "VMDファイル"),
+                                L("该动作VMD已在列表中。",
+                                    "That motion VMD is already in the list.",
+                                    "そのモーションVMDはすでにリストにあります。"));
+                        }
+                        else
+                        {
+                            motionVmdAssets[index] = nextMotion;
+                            changed = true;
+                        }
                     }
-                    else
+
+                    if (DrawMotionVmdDataRow(
+                            L("表情数据", "Expression Data", "表情データ"),
+                            motionExpressionVmdAssets[index],
+                            out DefaultAsset nextExpression))
                     {
-                        motionVmdAssets[index] = nextMotion;
+                        motionExpressionVmdAssets[index] = nextExpression;
                         changed = true;
                     }
                 }
-
-                if (DrawMotionVmdDataRow(
-                        L("表情数据", "Expression Data", "表情データ"),
-                        motionExpressionVmdAssets[index],
-                        out DefaultAsset nextExpression))
+                finally
                 {
-                    motionExpressionVmdAssets[index] = nextExpression;
-                    changed = true;
+                    EditorGUI.indentLevel = previousIndentLevel;
                 }
-                EditorGUI.indentLevel--;
 
                 if (motionVmdAssets[index] != null || motionExpressionVmdAssets[index] != null)
                     continue;
@@ -623,10 +656,13 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
                 motionVmdFileFoldouts.RemoveAt(index);
                 changed = true;
                 break;
+                }
             }
-
-            if (useScrollView)
-                EditorGUILayout.EndScrollView();
+            finally
+            {
+                if (useScrollView)
+                    EditorGUILayout.EndScrollView();
+            }
         }
 
         Rect dropRect = GUILayoutUtility.GetRect(0f, 42f, GUILayout.ExpandWidth(true));
@@ -1508,8 +1544,26 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
         if (selectedModelIndex < 0) selectedModelIndex = 0;
     }
 
+    private void EnsurePipelineModelsAreAlive()
+    {
+        if (pipelineModels == null)
+        {
+            pipelineModels = new List<GameObject>();
+            ScanPipelineModels();
+            return;
+        }
+
+        bool containsInvalidModel = pipelineModels.Any(model =>
+            model == null || !model.scene.IsValid());
+        if (!containsInvalidModel) return;
+
+        InvalidateMappingTargetCache();
+        ScanPipelineModels();
+    }
+
     private static string GetHierarchyPath(GameObject gameObject)
     {
+        if (gameObject == null) return string.Empty;
         var names = new List<string>();
         for (Transform current = gameObject.transform; current != null; current = current.parent)
             names.Add(current.name);
@@ -1533,6 +1587,21 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
             motionVmdFileFoldouts.Add(false);
         while (motionVmdFileFoldouts.Count > motionVmdAssets.Count)
             motionVmdFileFoldouts.RemoveAt(motionVmdFileFoldouts.Count - 1);
+    }
+
+    private void RemoveMissingMotionEntries()
+    {
+        EnsureMotionVmdEntryState();
+        for (int index = motionVmdAssets.Count - 1; index >= 0; index--)
+        {
+            if (motionVmdAssets[index] != null ||
+                motionExpressionVmdAssets[index] != null)
+                continue;
+
+            motionVmdAssets.RemoveAt(index);
+            motionExpressionVmdAssets.RemoveAt(index);
+            motionVmdFileFoldouts.RemoveAt(index);
+        }
     }
 
     private bool GetMappingFoldout(string key, bool defaultExpanded)

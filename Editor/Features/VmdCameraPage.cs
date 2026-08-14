@@ -52,9 +52,17 @@ internal sealed class VmdCameraPage : ConverterFeaturePage
     {
         Attach(context);
         if (cameraVmdAssets == null) cameraVmdAssets = new List<DefaultAsset>();
+        cameraVmdAssets.RemoveAll(asset => asset == null);
+        if (targetPreview == null) targetPreview = null;
         pageScroll = EditorGUILayout.BeginScrollView(pageScroll);
-        DrawCameraConverter();
-        EditorGUILayout.EndScrollView();
+        try
+        {
+            DrawCameraConverter();
+        }
+        finally
+        {
+            EditorGUILayout.EndScrollView();
+        }
     }
 
     internal void DrawAction(ConverterWindowContext context)
@@ -120,52 +128,57 @@ internal sealed class VmdCameraPage : ConverterFeaturePage
                     GUILayout.Height(maxListHeight));
             }
 
-            for (int index = 0; index < assets.Count; index++)
+            try
             {
-                using (new EditorGUILayout.HorizontalScope())
+                for (int index = 0; index < assets.Count; index++)
                 {
-                    DefaultAsset next = (DefaultAsset)EditorGUILayout.ObjectField(
-                        assets[index],
-                        typeof(DefaultAsset),
-                        false);
-                    if (next != assets[index])
+                    using (new EditorGUILayout.HorizontalScope())
                     {
-                        if (next == null || IsVmdAsset(next))
+                        DefaultAsset next = (DefaultAsset)EditorGUILayout.ObjectField(
+                            assets[index],
+                            typeof(DefaultAsset),
+                            false);
+                        if (next != assets[index])
                         {
-                            string nextPath = GetVmdAssetPath(next);
-                            bool duplicate = !string.IsNullOrEmpty(nextPath) && assets
-                                .Where((_, otherIndex) => otherIndex != index)
-                                .Any(other => string.Equals(
-                                    GetVmdAssetPath(other),
-                                    nextPath,
-                                    StringComparison.OrdinalIgnoreCase));
-                            if (!duplicate)
+                            if (next == null || IsVmdAsset(next))
                             {
-                                assets[index] = next;
-                                changed = true;
+                                string nextPath = GetVmdAssetPath(next);
+                                bool duplicate = !string.IsNullOrEmpty(nextPath) && assets
+                                    .Where((_, otherIndex) => otherIndex != index)
+                                    .Any(other => string.Equals(
+                                        GetVmdAssetPath(other),
+                                        nextPath,
+                                        StringComparison.OrdinalIgnoreCase));
+                                if (!duplicate)
+                                {
+                                    assets[index] = next;
+                                    changed = true;
+                                }
+                            }
+                            else
+                            {
+                                ShowDialog(
+                                    L("VMD文件", "VMD Files", "VMDファイル"),
+                                    L("请选择Assets目录中的.vmd文件。",
+                                        "Select .vmd files inside Assets.",
+                                        "Assets内の.vmdファイルを選択してください。"));
                             }
                         }
-                        else
-                        {
-                            ShowDialog(
-                                L("VMD文件", "VMD Files", "VMDファイル"),
-                                L("请选择Assets目录中的.vmd文件。",
-                                    "Select .vmd files inside Assets.",
-                                    "Assets内の.vmdファイルを選択してください。"));
-                        }
-                    }
 
-                    if (GUILayout.Button("−", GUILayout.Width(24f)))
-                    {
-                        assets.RemoveAt(index);
-                        changed = true;
-                        break;
+                        if (GUILayout.Button("−", GUILayout.Width(24f)))
+                        {
+                            assets.RemoveAt(index);
+                            changed = true;
+                            break;
+                        }
                     }
                 }
             }
-
-            if (useScrollView)
-                EditorGUILayout.EndScrollView();
+            finally
+            {
+                if (useScrollView)
+                    EditorGUILayout.EndScrollView();
+            }
         }
 
         Rect dropRect = GUILayoutUtility.GetRect(0f, 42f, GUILayout.ExpandWidth(true));

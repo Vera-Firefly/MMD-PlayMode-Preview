@@ -6,16 +6,23 @@ internal static class ConverterWindowGui
 {
     internal static void DrawOutlinedSetting(Action draw)
     {
+        if (draw == null) return;
         Rect border = EditorGUILayout.BeginVertical();
-        GUILayout.Space(5f);
-        using (new EditorGUILayout.HorizontalScope())
+        try
         {
-            GUILayout.Space(7f);
-            using (new EditorGUILayout.VerticalScope()) draw();
-            GUILayout.Space(7f);
+            GUILayout.Space(5f);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.Space(7f);
+                using (new EditorGUILayout.VerticalScope()) draw();
+                GUILayout.Space(7f);
+            }
+            GUILayout.Space(5f);
         }
-        GUILayout.Space(5f);
-        EditorGUILayout.EndVertical();
+        finally
+        {
+            EditorGUILayout.EndVertical();
+        }
         DrawOutline(border);
         EditorGUILayout.Space(4f);
     }

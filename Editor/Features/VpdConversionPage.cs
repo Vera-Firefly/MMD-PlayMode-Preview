@@ -47,9 +47,18 @@ internal sealed class VpdConversionPage : ConverterFeaturePage
     {
         Attach(context);
         EnsureVpdEntryState();
+        RemoveMissingVpdEntries();
+        if (vpdModelAsset == null) vpdModelAsset = null;
+        if (vpdTargetAvatar == null) vpdTargetAvatar = null;
         pageScroll = EditorGUILayout.BeginScrollView(pageScroll);
-        DrawVpdConverter();
-        EditorGUILayout.EndScrollView();
+        try
+        {
+            DrawVpdConverter();
+        }
+        finally
+        {
+            EditorGUILayout.EndScrollView();
+        }
     }
 
     internal void DrawAction(ConverterWindowContext context)
@@ -187,25 +196,33 @@ internal sealed class VpdConversionPage : ConverterFeaturePage
                     vpdListScroll, false, false, GUILayout.Height(maxListHeight));
             }
 
-            for (int index = 0; index < vpdAssets.Count; index++)
+            try
             {
+                for (int index = 0; index < vpdAssets.Count; index++)
+                {
                 if (index > 0) ConverterWindowGui.DrawEntrySeparator();
                 Color entryColor = GetMotionEntryColor(index);
                 bool removeEntry;
                 Color previousContentColor = GUI.contentColor;
-                GUI.contentColor = entryColor;
-                using (new EditorGUILayout.HorizontalScope())
+                try
                 {
-                    string arrow = vpdFileFoldouts[index] ? "▼ " : "▶ ";
-                    if (GUILayout.Button(
-                            arrow + GetVpdDisplayName(vpdAssets[index]),
-                            EditorStyles.boldLabel,
-                            GUILayout.ExpandWidth(true)))
-                        vpdFileFoldouts[index] = !vpdFileFoldouts[index];
-                    removeEntry = GUILayout.Button(
-                        "×", EditorStyles.miniButton, GUILayout.Width(24f));
+                    GUI.contentColor = entryColor;
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        string arrow = vpdFileFoldouts[index] ? "▼ " : "▶ ";
+                        if (GUILayout.Button(
+                                arrow + GetVpdDisplayName(vpdAssets[index]),
+                                EditorStyles.boldLabel,
+                                GUILayout.ExpandWidth(true)))
+                            vpdFileFoldouts[index] = !vpdFileFoldouts[index];
+                        removeEntry = GUILayout.Button(
+                            "×", EditorStyles.miniButton, GUILayout.Width(24f));
+                    }
                 }
-                GUI.contentColor = previousContentColor;
+                finally
+                {
+                    GUI.contentColor = previousContentColor;
+                }
                 if (removeEntry)
                 {
                     vpdAssets.RemoveAt(index);
@@ -214,45 +231,56 @@ internal sealed class VpdConversionPage : ConverterFeaturePage
                 }
                 if (!vpdFileFoldouts[index]) continue;
 
-                EditorGUI.indentLevel++;
-                if (DrawVpdDataRow(
-                        L("姿势数据", "Pose Data", "ポーズデータ"),
-                        vpdAssets[index],
-                        out DefaultAsset next))
+                int previousIndentLevel = EditorGUI.indentLevel;
+                try
                 {
-                    if (next == null)
+                    EditorGUI.indentLevel = previousIndentLevel + 1;
+                    if (DrawVpdDataRow(
+                            L("姿势数据", "Pose Data", "ポーズデータ"),
+                            vpdAssets[index],
+                            out DefaultAsset next))
                     {
-                        vpdAssets[index] = null;
-                    }
-                    else
-                    {
-                        string nextPath = GetVpdAssetPath(next);
-                        bool duplicate = vpdAssets
-                            .Where((_, otherIndex) => otherIndex != index)
-                            .Any(other => string.Equals(
-                                GetVpdAssetPath(other), nextPath,
-                                StringComparison.OrdinalIgnoreCase));
-                        if (duplicate)
+                        if (next == null)
                         {
-                            ShowDialog(
-                                L("VPD文件", "VPD Files", "VPDファイル"),
-                                L("该VPD已在列表中。",
-                                    "That VPD is already in the list.",
-                                    "そのVPDはすでにリストにあります。"));
+                            vpdAssets[index] = null;
                         }
                         else
                         {
-                            vpdAssets[index] = next;
+                            string nextPath = GetVpdAssetPath(next);
+                            bool duplicate = vpdAssets
+                                .Where((_, otherIndex) => otherIndex != index)
+                                .Any(other => string.Equals(
+                                    GetVpdAssetPath(other), nextPath,
+                                    StringComparison.OrdinalIgnoreCase));
+                            if (duplicate)
+                            {
+                                ShowDialog(
+                                    L("VPD文件", "VPD Files", "VPDファイル"),
+                                    L("该VPD已在列表中。",
+                                        "That VPD is already in the list.",
+                                        "そのVPDはすでにリストにあります。"));
+                            }
+                            else
+                            {
+                                vpdAssets[index] = next;
+                            }
                         }
                     }
                 }
-                EditorGUI.indentLevel--;
+                finally
+                {
+                    EditorGUI.indentLevel = previousIndentLevel;
+                }
                 if (vpdAssets[index] != null) continue;
                 vpdAssets.RemoveAt(index);
                 vpdFileFoldouts.RemoveAt(index);
                 break;
+                }
             }
-            if (useScrollView) EditorGUILayout.EndScrollView();
+            finally
+            {
+                if (useScrollView) EditorGUILayout.EndScrollView();
+            }
         }
 
         Rect dropRect = GUILayoutUtility.GetRect(0f, 42f, GUILayout.ExpandWidth(true));
@@ -318,6 +346,17 @@ internal sealed class VpdConversionPage : ConverterFeaturePage
             vpdFileFoldouts.Add(false);
         while (vpdFileFoldouts.Count > vpdAssets.Count)
             vpdFileFoldouts.RemoveAt(vpdFileFoldouts.Count - 1);
+    }
+
+    private void RemoveMissingVpdEntries()
+    {
+        EnsureVpdEntryState();
+        for (int index = vpdAssets.Count - 1; index >= 0; index--)
+        {
+            if (vpdAssets[index] != null) continue;
+            vpdAssets.RemoveAt(index);
+            vpdFileFoldouts.RemoveAt(index);
+        }
     }
 
     private void ConvertVpds(

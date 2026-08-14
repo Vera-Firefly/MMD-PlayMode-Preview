@@ -975,6 +975,7 @@ internal static class VmdMotionConverter
 
     private static string GetHierarchyPath(GameObject gameObject)
     {
+        if (gameObject == null) return string.Empty;
         var names = new List<string>();
         for (Transform current = gameObject.transform; current != null; current = current.parent)
             names.Add(current.name);
