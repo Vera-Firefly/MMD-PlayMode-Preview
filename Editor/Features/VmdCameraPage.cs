@@ -53,7 +53,6 @@ internal sealed class VmdCameraPage : ConverterFeaturePage
         Attach(context);
         if (cameraVmdAssets == null) cameraVmdAssets = new List<DefaultAsset>();
         cameraVmdAssets.RemoveAll(asset => asset == null);
-        if (targetPreview == null) targetPreview = null;
         pageScroll = EditorGUILayout.BeginScrollView(pageScroll);
         try
         {

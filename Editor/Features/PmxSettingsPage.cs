@@ -30,10 +30,6 @@ internal sealed class PmxSettingsPage : ConverterFeaturePage
     internal void Draw(ConverterWindowContext context)
     {
         Attach(context);
-        if (debugPmxAsset == null) debugPmxAsset = null;
-        if (debugVmdAsset == null) debugVmdAsset = null;
-        if (debugSkeletonRoot == null) debugSkeletonRoot = null;
-        if (debugMorphTargetRoot == null) debugMorphTargetRoot = null;
         pageScroll = EditorGUILayout.BeginScrollView(pageScroll);
         try
         {

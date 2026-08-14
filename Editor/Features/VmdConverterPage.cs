@@ -135,7 +135,6 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
         EnsurePipelineModelsAreAlive();
         EnsureMotionVmdEntryState();
         RemoveMissingMotionEntries();
-        if (motionModelAsset == null) motionModelAsset = null;
         if (convertedMotionEntries == null) convertedMotionEntries = new List<ConvertedMotionEntry>();
         pageScroll = EditorGUILayout.BeginScrollView(pageScroll);
         try

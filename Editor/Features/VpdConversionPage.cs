@@ -48,8 +48,6 @@ internal sealed class VpdConversionPage : ConverterFeaturePage
         Attach(context);
         EnsureVpdEntryState();
         RemoveMissingVpdEntries();
-        if (vpdModelAsset == null) vpdModelAsset = null;
-        if (vpdTargetAvatar == null) vpdTargetAvatar = null;
         pageScroll = EditorGUILayout.BeginScrollView(pageScroll);
         try
         {
