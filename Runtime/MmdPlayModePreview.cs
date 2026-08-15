@@ -1,6 +1,9 @@
 using System.Collections.Generic;
 using UnityEngine;
 using AvatarDescriptor = VRC.SDKBase.VRC_AvatarDescriptor;
+#if UNITY_EDITOR
+using System;
+#endif
 
 public enum MmdPreviewDurationSource
 {
@@ -17,6 +20,16 @@ public enum MmdPreviewDurationSource
 [DefaultExecutionOrder(32000)]
 public sealed class MmdPlayModePreview : MonoBehaviour
 {
+#if UNITY_EDITOR
+    /// <summary>
+    /// Editor-only fallback for FK/Transform clips on Humanoid Animators. Unity's
+    /// AnimationClip.SampleAnimation can apply blend shapes while ignoring raw
+    /// Transform bindings on this combination, so the editor installs a cached
+    /// direct-curve sampler during Play Mode.
+    /// </summary>
+    public static Func<AnimationClip, GameObject, float, bool> EditorTransformClipSampler;
+#endif
+
     [Header("Preview")]
     public GameObject avatar;
     public bool enablePreviewBackground;
@@ -289,7 +302,16 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
     private void SamplePreview(float time)
     {
-        if (animationClip != null && avatar != null) animationClip.SampleAnimation(avatar, time);
+        if (animationClip != null && avatar != null)
+        {
+            // Keep Unity sampling for Humanoid curves and blend shapes. The
+            // editor fallback then reapplies raw FK Transform curves after it,
+            // so an active Humanoid Animator cannot discard the bone pose.
+            animationClip.SampleAnimation(avatar, time);
+#if UNITY_EDITOR
+            EditorTransformClipSampler?.Invoke(animationClip, avatar, time);
+#endif
+        }
         if (IsCameraAnimationMode) SampleCameraAnimation(time);
     }
 

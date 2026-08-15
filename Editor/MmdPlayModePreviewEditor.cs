@@ -26,6 +26,38 @@ public sealed class MmdPlayModePreviewEditor : Editor
     private static GUIStyle titleStyle;
     private static GUIStyle versionStyle;
     private static GUIStyle authorStyle;
+    private static AnimationClip cachedMotionTypeClip;
+    private static PreviewMotionClipType cachedMotionClipType;
+    private static AnimationClip sampledTransformClip;
+    private static GameObject sampledTransformAvatar;
+    private static TransformCurveSet[] sampledTransformCurves;
+
+    private enum PreviewMotionClipType
+    {
+        None,
+        Humanoid,
+        TargetFk,
+        Transform,
+        AnimationClip
+    }
+
+    private sealed class TransformCurveSet
+    {
+        internal string Path;
+        internal Transform Target;
+        internal AnimationCurve PositionX;
+        internal AnimationCurve PositionY;
+        internal AnimationCurve PositionZ;
+        internal AnimationCurve RotationX;
+        internal AnimationCurve RotationY;
+        internal AnimationCurve RotationZ;
+        internal AnimationCurve RotationW;
+
+        internal bool HasPosition =>
+            PositionX != null || PositionY != null || PositionZ != null;
+        internal bool HasRotation =>
+            RotationX != null || RotationY != null || RotationZ != null || RotationW != null;
+    }
 
     private enum EditorLanguage
     {
@@ -234,6 +266,7 @@ public sealed class MmdPlayModePreviewEditor : Editor
     [InitializeOnLoadMethod]
     private static void ScheduleScriptIcon()
     {
+        MmdPlayModePreview.EditorTransformClipSampler = SampleTransformClip;
         EditorApplication.delayCall += ApplyScriptIcon;
     }
 
@@ -441,6 +474,181 @@ public sealed class MmdPlayModePreviewEditor : Editor
                 GUILayout.Label($"{FormatPlaybackTime(preview.PlaybackTime)} / {FormatPlaybackTime(duration)}", EditorStyles.centeredGreyMiniLabel, GUILayout.Width(130f));
                 GUILayout.FlexibleSpace();
             }
+
+            if (preview.animationClip != null)
+            {
+                string typeLabel = GetMotionClipTypeLabel(
+                    DetectMotionClipType(preview.animationClip));
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    GUILayout.FlexibleSpace();
+                    GUILayout.Label(
+                        L("当前播放类型：", "Current playback type: ", "現在の再生タイプ：") + typeLabel,
+                        EditorStyles.centeredGreyMiniLabel);
+                    GUILayout.FlexibleSpace();
+                }
+            }
+        }
+    }
+
+    private static PreviewMotionClipType DetectMotionClipType(AnimationClip clip)
+    {
+        if (clip == null) return PreviewMotionClipType.None;
+        if (clip == cachedMotionTypeClip) return cachedMotionClipType;
+
+        PreviewMotionClipType result;
+        if (clip.humanMotion)
+        {
+            result = PreviewMotionClipType.Humanoid;
+        }
+        else
+        {
+            EditorCurveBinding[] bindings = AnimationUtility.GetCurveBindings(clip);
+            var rotationPaths = new HashSet<string>(StringComparer.Ordinal);
+            bool hasHumanoidRootOrMuscle = false;
+            bool hasTransformCurves = false;
+            for (int index = 0; index < bindings.Length; index++)
+            {
+                EditorCurveBinding binding = bindings[index];
+                if (binding.type == typeof(Animator) &&
+                    (binding.propertyName.StartsWith("RootT.", StringComparison.Ordinal) ||
+                     binding.propertyName.StartsWith("RootQ.", StringComparison.Ordinal) ||
+                     binding.propertyName.StartsWith("Muscle.", StringComparison.Ordinal)))
+                {
+                    hasHumanoidRootOrMuscle = true;
+                    break;
+                }
+
+                if (binding.type != typeof(Transform)) continue;
+                hasTransformCurves = true;
+                if (binding.propertyName.StartsWith("m_LocalRotation.", StringComparison.Ordinal))
+                    rotationPaths.Add(binding.path ?? string.Empty);
+            }
+
+            if (hasHumanoidRootOrMuscle)
+                result = PreviewMotionClipType.Humanoid;
+            else if (rotationPaths.Count >= 6)
+                result = PreviewMotionClipType.TargetFk;
+            else if (hasTransformCurves)
+                result = PreviewMotionClipType.Transform;
+            else
+                result = PreviewMotionClipType.AnimationClip;
+        }
+
+        cachedMotionTypeClip = clip;
+        cachedMotionClipType = result;
+        return result;
+    }
+
+    private static bool SampleTransformClip(AnimationClip clip, GameObject avatar, float time)
+    {
+        if (clip == null || avatar == null ||
+            DetectMotionClipType(clip) != PreviewMotionClipType.TargetFk)
+            return false;
+
+        if (clip != sampledTransformClip || avatar != sampledTransformAvatar ||
+            sampledTransformCurves == null)
+        {
+            sampledTransformClip = clip;
+            sampledTransformAvatar = avatar;
+            sampledTransformCurves = BuildTransformCurveSets(clip, avatar.transform);
+        }
+
+        for (int index = 0; index < sampledTransformCurves.Length; index++)
+        {
+            TransformCurveSet curves = sampledTransformCurves[index];
+            Transform target = curves.Target;
+            if (target == null) continue;
+
+            if (curves.HasPosition)
+            {
+                Vector3 position = target.localPosition;
+                if (curves.PositionX != null) position.x = curves.PositionX.Evaluate(time);
+                if (curves.PositionY != null) position.y = curves.PositionY.Evaluate(time);
+                if (curves.PositionZ != null) position.z = curves.PositionZ.Evaluate(time);
+                target.localPosition = position;
+            }
+
+            if (!curves.HasRotation) continue;
+            Quaternion rotation = target.localRotation;
+            if (curves.RotationX != null) rotation.x = curves.RotationX.Evaluate(time);
+            if (curves.RotationY != null) rotation.y = curves.RotationY.Evaluate(time);
+            if (curves.RotationZ != null) rotation.z = curves.RotationZ.Evaluate(time);
+            if (curves.RotationW != null) rotation.w = curves.RotationW.Evaluate(time);
+            float lengthSquared = rotation.x * rotation.x + rotation.y * rotation.y +
+                                  rotation.z * rotation.z + rotation.w * rotation.w;
+            if (lengthSquared > 1e-12f)
+            {
+                float inverseLength = 1f / Mathf.Sqrt(lengthSquared);
+                target.localRotation = new Quaternion(
+                    rotation.x * inverseLength,
+                    rotation.y * inverseLength,
+                    rotation.z * inverseLength,
+                    rotation.w * inverseLength);
+            }
+        }
+        return true;
+    }
+
+    private static TransformCurveSet[] BuildTransformCurveSets(
+        AnimationClip clip, Transform avatarRoot)
+    {
+        var byPath = new Dictionary<string, TransformCurveSet>(StringComparer.Ordinal);
+        EditorCurveBinding[] bindings = AnimationUtility.GetCurveBindings(clip);
+        for (int index = 0; index < bindings.Length; index++)
+        {
+            EditorCurveBinding binding = bindings[index];
+            if (binding.type != typeof(Transform)) continue;
+            bool position = binding.propertyName.StartsWith(
+                "m_LocalPosition.", StringComparison.Ordinal);
+            bool rotation = binding.propertyName.StartsWith(
+                "m_LocalRotation.", StringComparison.Ordinal);
+            if (!position && !rotation) continue;
+
+            string path = binding.path ?? string.Empty;
+            if (!byPath.TryGetValue(path, out TransformCurveSet curves))
+            {
+                curves = new TransformCurveSet
+                {
+                    Path = path,
+                    Target = string.IsNullOrEmpty(path)
+                        ? avatarRoot
+                        : avatarRoot.Find(path)
+                };
+                byPath.Add(path, curves);
+            }
+
+            AnimationCurve curve = AnimationUtility.GetEditorCurve(clip, binding);
+            switch (binding.propertyName)
+            {
+                case "m_LocalPosition.x": curves.PositionX = curve; break;
+                case "m_LocalPosition.y": curves.PositionY = curve; break;
+                case "m_LocalPosition.z": curves.PositionZ = curve; break;
+                case "m_LocalRotation.x": curves.RotationX = curve; break;
+                case "m_LocalRotation.y": curves.RotationY = curve; break;
+                case "m_LocalRotation.z": curves.RotationZ = curve; break;
+                case "m_LocalRotation.w": curves.RotationW = curve; break;
+            }
+        }
+        return new List<TransformCurveSet>(byPath.Values).ToArray();
+    }
+
+    private static string GetMotionClipTypeLabel(PreviewMotionClipType type)
+    {
+        switch (type)
+        {
+            case PreviewMotionClipType.Humanoid:
+                return L("Humanoid（Root/Muscle）", "Humanoid (Root/Muscle)",
+                    "Humanoid（Root/Muscle）");
+            case PreviewMotionClipType.TargetFk:
+                return L("目标 FK（Transform 曲线）", "Target FK (Transform curves)",
+                    "対象 FK（Transform カーブ）");
+            case PreviewMotionClipType.Transform:
+                return L("Transform 动画", "Transform animation", "Transform アニメーション");
+            case PreviewMotionClipType.AnimationClip:
+                return "AnimationClip";
+            default:
+                return L("无", "None", "なし");
         }
     }
 

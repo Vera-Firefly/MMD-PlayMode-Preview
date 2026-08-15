@@ -6,49 +6,9 @@ using UnityEngine;
 
 namespace VRChat.MmdPreview.Pmx2Fbx.Editor
 {
-    public enum PmxCoordinateConversion
+    internal static class PmxAnimationClipBaker
     {
-        MmdToUnity,
-        MmdToUnityAndRotateY180,
-        RotateY180,
-        None
-    }
-
-    [Serializable]
-    public sealed class PmxAnimationClipBakerOptions
-    {
-        public float SampleRate = 30f;
-        public float PositionScale = 1f;
-        // Match the native PMX2FBX/Mecanim output basis. Humanoid root motion
-        // must include the model-facing 180-degree Y rotation; otherwise RootT.x
-        // and RootQ.y/z are mirrored even though the body muscle curves are valid.
-        public PmxCoordinateConversion CoordinateConversion = PmxCoordinateConversion.RotateY180;
-        public bool BakeMorphs = true;
-        public bool EnforceHumanoidTPose = true;
-        // Maximum value error introduced when reducing densely sampled linear
-        // curves. 1e-4 is far below visible Humanoid muscle/root-motion changes.
-        // Set to zero to retain every baked sample.
-        public float CurveReductionError = 0.0001f;
-        // Debug compatibility path for target-calibrated Humanoid output. When enabled,
-        // upper-limb muscles are extracted from the target FK reconstruction instead of
-        // the canonical PMX Humanoid rig. This can help unusual Avatar definitions, but
-        // is less stable around arm/forearm twist branches, so it is disabled by default.
-        public bool TargetUpperLimbInverseSolve;
-        public PmxEvaluationOptions Evaluation = new PmxEvaluationOptions();
-    }
-
-    public sealed class PmxAnimationBakeReport
-    {
-        public AnimationClip Clip;
-        public readonly List<string> MissingBones = new List<string>();
-        public int BoundBoneCount;
-        public int BoundMorphCount;
-        public int SampleCount;
-    }
-
-    public static class PmxAnimationClipBaker
-    {
-        public static PmxAnimationBakeReport Bake(PmxModel model, VmdMotion motion, Transform root,
+        internal static PmxAnimationBakeReport Debug_Bake(PmxModel model, VmdMotion motion, Transform root,
             PmxAnimationClipBakerOptions options = null, Action<float, string> progress = null)
         {
             if (model == null) throw new ArgumentNullException(nameof(model));
@@ -131,14 +91,14 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
             return report;
         }
 
-        public static PmxAnimationBakeReport BakeToAsset(string pmxPath, string vmdPath, Transform root,
+        internal static PmxAnimationBakeReport Debug_BakeToAsset(string pmxPath, string vmdPath, Transform root,
             string outputAssetPath, PmxAnimationClipBakerOptions options = null,
             Action<float, string> progress = null)
         {
             ValidateAssetPath(outputAssetPath);
             PmxModel model = PmxModelCache.Load(pmxPath);
             VmdMotion motion = VmdParser.Parse(ToPhysicalPath(vmdPath));
-            PmxAnimationBakeReport report = Bake(model, motion, root, options, progress);
+            PmxAnimationBakeReport report = Debug_Bake(model, motion, root, options, progress);
             report.Clip.name = Path.GetFileNameWithoutExtension(outputAssetPath);
             AssetDatabase.DeleteAsset(outputAssetPath);
             AssetDatabase.CreateAsset(report.Clip, outputAssetPath);
@@ -301,6 +261,85 @@ namespace VRChat.MmdPreview.Pmx2Fbx.Editor
                 float outTangent = index + 1 < keys.Length
                     ? CalculateSlope(keys[index], keys[index + 1])
                     : keys.Length > 1 ? CalculateSlope(keys[keys.Length - 2], keys[keys.Length - 1]) : 0f;
+                Keyframe key = keys[index];
+                key.inTangent = inTangent;
+                key.outTangent = outTangent;
+                key.inWeight = 0f;
+                key.outWeight = 0f;
+                key.weightedMode = WeightedMode.None;
+                keys[index] = key;
+            }
+            return keys;
+        }
+
+        internal static Keyframe[] CreateLinearKeys(
+            float[] times, float[] values, int count, float reductionError = 0f)
+        {
+            if (times == null) throw new ArgumentNullException(nameof(times));
+            if (values == null) throw new ArgumentNullException(nameof(values));
+            if (count < 0 || count > times.Length || count > values.Length)
+                throw new ArgumentOutOfRangeException(nameof(count));
+            if (count == 0) return Array.Empty<Keyframe>();
+
+            bool[] keep = null;
+            int keptCount = count;
+            if (count > 2 && reductionError > 0f)
+            {
+                keep = new bool[count];
+                keep[0] = true;
+                keep[count - 1] = true;
+                var ranges = new Stack<int>();
+                ranges.Push(0);
+                ranges.Push(count - 1);
+                while (ranges.Count > 0)
+                {
+                    int end = ranges.Pop();
+                    int start = ranges.Pop();
+                    float duration = times[end] - times[start];
+                    float largestError = -1f;
+                    int split = -1;
+                    for (int index = start + 1; index < end; index++)
+                    {
+                        float factor = Mathf.Abs(duration) > 1e-12f
+                            ? (times[index] - times[start]) / duration
+                            : 0f;
+                        float expected = Mathf.LerpUnclamped(
+                            values[start], values[end], factor);
+                        float error = Mathf.Abs(values[index] - expected);
+                        if (error <= largestError) continue;
+                        largestError = error;
+                        split = index;
+                    }
+                    if (split < 0 || largestError <= reductionError) continue;
+                    keep[split] = true;
+                    ranges.Push(start);
+                    ranges.Push(split);
+                    ranges.Push(split);
+                    ranges.Push(end);
+                }
+
+                keptCount = 0;
+                for (int index = 0; index < count; index++)
+                    if (keep[index]) keptCount++;
+            }
+
+            var keys = new Keyframe[keptCount];
+            int destination = 0;
+            for (int source = 0; source < count; source++)
+            {
+                if (keep != null && !keep[source]) continue;
+                keys[destination++] = new Keyframe(times[source], values[source]);
+            }
+            for (int index = 0; index < keys.Length; index++)
+            {
+                float inTangent = index > 0
+                    ? CalculateSlope(keys[index - 1], keys[index])
+                    : keys.Length > 1 ? CalculateSlope(keys[0], keys[1]) : 0f;
+                float outTangent = index + 1 < keys.Length
+                    ? CalculateSlope(keys[index], keys[index + 1])
+                    : keys.Length > 1
+                        ? CalculateSlope(keys[keys.Length - 2], keys[keys.Length - 1])
+                        : 0f;
                 Keyframe key = keys[index];
                 key.inTangent = inTangent;
                 key.outTangent = outTangent;

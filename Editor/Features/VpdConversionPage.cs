@@ -4,8 +4,6 @@ using System.IO;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
-using VRChat.MmdPreview.Pmx2Fbx;
-using VRChat.MmdPreview.Pmx2Fbx.Editor;
 
 [Serializable]
 internal sealed class VpdConversionPage : ConverterFeaturePage
@@ -368,27 +366,22 @@ internal sealed class VpdConversionPage : ConverterFeaturePage
         bool cancelled = false;
         var errors = new List<string>();
         AnimationClip lastClip = null;
-        PmxHumanoidAnimationClipBaker.BatchSession batchSession = null;
+        VpdAnimationConverter converter = null;
         try
         {
-            PmxModel model = PmxModelCache.Load(modelPath);
-            var options = new PmxAnimationClipBakerOptions
-            {
-                SampleRate = VmdFrameRate,
-                PositionScale = 0.08f,
-                CoordinateConversion = PmxCoordinateConversion.RotateY180,
-                BakeMorphs = true,
-                CurveReductionError = Mathf.Clamp(curveReductionError, 0f, 0.001f),
-                TargetUpperLimbInverseSolve = targetUpperLimbInverseSolve
-            };
             bool targetCalibrated = vpdOutputType == MotionOutputType.TargetCalibratedHumanoid;
-            batchSession = new PmxHumanoidAnimationClipBaker.BatchSession(
-                model, options);
+            converter = new VpdAnimationConverter(
+                modelPath,
+                targetAvatar,
+                targetCalibrated,
+                curveReductionError,
+                targetUpperLimbInverseSolve);
 
             for (int fileIndex = 0; fileIndex < sourcePaths.Count; fileIndex++)
             {
                 string sourcePath = sourcePaths[fileIndex];
-                string outputPath = GetVpdOutputPath(sourcePath, outputStorageFolder);
+                string outputPath = VpdAnimationConverter.GetOutputPath(
+                    sourcePath, outputStorageFolder);
                 try
                 {
                     if (AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(outputPath) != null &&
@@ -412,41 +405,8 @@ internal sealed class VpdConversionPage : ConverterFeaturePage
                             throw new OperationCanceledException("VPD conversion was cancelled.");
                     };
 
-                    progress(0.02f, "Reading VPD pose");
-                    VmdMotion motion = VpdParser.Parse(
-                        PmxAnimationClipBaker.ToPhysicalPath(sourcePath));
-                    PmxHumanoidAnimationClipBaker.PreparedMotion prepared =
-                        batchSession.Prepare(motion, 1);
-                    PmxAnimationBakeReport report;
-                    if (targetCalibrated)
-                    {
-                        report = batchSession.BakeTargetHumanoid(
-                            prepared, targetAvatar,
-                            (value, message) => progress(0.12f + value * 0.78f, message));
-                        if (targetAvatar != null)
-                            report.BoundMorphCount = PmxAnimationClipBaker.BakeMorphCurves(
-                                report.Clip, motion, targetAvatar.transform);
-                    }
-                    else
-                    {
-                        report = batchSession.Bake(
-                            prepared,
-                            targetAvatar != null ? targetAvatar.transform : null,
-                            (value, message) => progress(0.12f + value * 0.78f, message));
-                    }
-
-                    progress(0.92f, "Writing AnimationClip asset");
-                    report.Clip.name = Path.GetFileNameWithoutExtension(outputPath);
-                    VmdMotionConverter.EnsureAssetFolderExists(
-                        Path.GetDirectoryName(outputPath)?.Replace('\\', '/'));
-                    AssetDatabase.DeleteAsset(outputPath);
-                    AssetDatabase.CreateAsset(report.Clip, outputPath);
-                    AssetDatabase.SaveAssets();
-                    AssetDatabase.ImportAsset(
-                        outputPath, ImportAssetOptions.ForceSynchronousImport);
-                    lastClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(outputPath);
+                    lastClip = converter.ConvertToAsset(sourcePath, outputPath, progress);
                     converted++;
-                    progress(1f, "Conversion complete");
                 }
                 catch (OperationCanceledException)
                 {
@@ -471,7 +431,7 @@ internal sealed class VpdConversionPage : ConverterFeaturePage
         }
         finally
         {
-            if (batchSession != null) batchSession.Dispose();
+            if (converter != null) converter.Dispose();
             EditorUtility.ClearProgressBar();
         }
 
@@ -479,17 +439,6 @@ internal sealed class VpdConversionPage : ConverterFeaturePage
         ShowBatchResult(
             L("VPD转换", "VPD Conversion", "VPD変換"),
             converted, skipped, errors, cancelled);
-    }
-
-    private static string GetVpdOutputPath(string sourcePath, string outputFolder)
-    {
-        string fileName = Path.GetFileNameWithoutExtension(sourcePath) + "_VPD.anim";
-        if (string.IsNullOrEmpty(outputFolder))
-        {
-            string sourceFolder = Path.GetDirectoryName(sourcePath)?.Replace('\\', '/');
-            return string.IsNullOrEmpty(sourceFolder) ? fileName : sourceFolder + "/" + fileName;
-        }
-        return outputFolder.TrimEnd('/') + "/" + fileName;
     }
 
     private bool TryGetVpdOutputStorageFolder(out string folder)

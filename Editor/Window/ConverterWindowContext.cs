@@ -15,10 +15,11 @@ internal enum ConverterEditorLanguage
 
 internal enum BuiltInDebugOutput
 {
-    Humanoid,
-    GenericTransform,
-    TargetModelFkFidelity,
-    TargetCalibratedHumanoid
+    Humanoid = 0,
+    GenericTransform = 1,
+    TargetModelFkFidelity = 2,
+    TargetCalibratedHumanoid = 3,
+    TargetModelLowerBodyFkFidelity = 4
 }
 
 internal enum MotionOutputType
@@ -244,13 +245,14 @@ internal abstract class ConverterFeaturePage
                 EditorStyles.miniLabel);
     }
 
-    protected PmxTargetFkBakeOptions CreateFkBakeOptions()
+    protected PmxDebugTargetFkBakeOptions Debug_CreateFkBakeOptions()
     {
-        return new PmxTargetFkBakeOptions
+        return new PmxDebugTargetFkBakeOptions
         {
             RotationErrorDegrees = Mathf.Clamp(fkRotationErrorDegrees, 0f, 0.1f),
             PositionError = Mathf.Clamp(fkPositionError, 0f, 0.001f),
-            BakeRootTranslation = true
+            BakeRootTranslation = true,
+            UpperLimbInverseSolve = targetUpperLimbInverseSolve
         };
     }
 

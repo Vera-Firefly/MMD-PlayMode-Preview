@@ -6,8 +6,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
-using VRChat.MmdPreview.Pmx2Fbx;
-using VRChat.MmdPreview.Pmx2Fbx.Editor;
 
 [Serializable]
 internal sealed class VmdConverterPage : ConverterFeaturePage
@@ -745,7 +743,7 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
         bool cancelled = false;
         var errors = new List<string>();
         VmdMotionConversionData lastData = null;
-        PmxHumanoidAnimationClipBaker.BatchSession batchSession = null;
+        VmdMotionConverter.ManagedBatchSession batchSession = null;
         bool assetEditing = false;
         if (sourcePaths.Count > 1 &&
             modelParserMethod == VmdMotionConverter.ModelParserMethod.BuiltInManaged)
@@ -971,6 +969,7 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
         var pending = new List<ManagedPreparationJob>();
         VmdMotionConversionData lastData = null;
         AnimationClip lastClip = null;
+        string lastClipPath = null;
 
         for (int index = 0; index < sourcePaths.Count; index++)
         {
@@ -1010,7 +1009,7 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
             return;
         }
 
-        PmxHumanoidAnimationClipBaker.BatchSession batchSession = null;
+        VmdMotionConverter.ManagedBatchSession batchSession = null;
         var cancellation = new CancellationTokenSource();
         bool assetEditing = false;
         var active = new List<ManagedPreparationJob>();
@@ -1018,13 +1017,13 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
         {
             batchSession = VmdMotionConverter.CreateManagedBatchSession(
                 modelPath, curveReductionError, targetUpperLimbInverseSolve);
-            if (!directExport && pending.Count > 1)
+            if (pending.Count > 1)
             {
                 AssetDatabase.StartAssetEditing();
                 assetEditing = true;
             }
 
-            int availableWorkers = PmxHumanoidAnimationClipBaker.DefaultParallelism;
+            int availableWorkers = VmdMotionConverter.ManagedDefaultParallelism;
             int fileParallelism = Math.Min(pending.Count, Math.Min(4, availableWorkers));
             int frameParallelism = Math.Max(
                 1, (availableWorkers + fileParallelism - 1) / Math.Max(1, fileParallelism));
@@ -1170,7 +1169,8 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
                                 ConfirmOverwrite,
                                 (value, message) => progress(0.72f + value * 0.28f, message),
                                 sourceClip,
-                                outputStorageFolder);
+                                outputStorageFolder,
+                                assetEditing);
                             if (clip == null)
                             {
                                 skipped++;
@@ -1178,6 +1178,7 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
                             }
                             converted++;
                             lastClip = clip;
+                            lastClipPath = AssetDatabase.GetAssetPath(clip);
                         }
                         finally
                         {
@@ -1290,6 +1291,8 @@ internal sealed class VmdConverterPage : ConverterFeaturePage
         }
         else if (lastClip != null)
         {
+            if (!string.IsNullOrEmpty(lastClipPath))
+                lastClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(lastClipPath) ?? lastClip;
             ApplyExportedClip(lastClip);
         }
         ShowBatchResult(

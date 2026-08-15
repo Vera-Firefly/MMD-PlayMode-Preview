@@ -76,9 +76,9 @@ Do not merge unrelated files into the package directory. The package self-check 
 
 ## Bundled reference rig
 
-The package includes a mesh-free standard MMD Humanoid reference rig at `Editor/VmdMotionConverter/Model/_model.pmx`. It contains the bone, IK, and morph definitions required by the conversion pipeline and no character mesh or textures.
+The package includes a mesh-free standard MMD Humanoid reference rig at `Editor/MotionConverter/Model/_model.pmx`. It contains the bone, IK, and morph definitions required by the conversion pipeline and no character mesh or textures.
 
-The generated reference PMX and its generator are licensed under the Apache License 2.0. Their license and notices are located in `Editor/VmdMotionConverter/Model/`.
+The generated reference PMX and its generator are licensed under the Apache License 2.0. Their license and notices are located in `Editor/MotionConverter/Model/`.
 
 ## License
 

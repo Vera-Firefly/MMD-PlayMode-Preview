@@ -76,9 +76,9 @@ MMD Play Mode Preview 是一个 Unity Editor 工具包，用于在 VRChat Avatar
 
 ## 内置参考骨架
 
-包内包含无角色网格的标准 MMD Humanoid 参考骨架：`Editor/VmdMotionConverter/Model/_model.pmx`。该文件仅保留转换流程所需的骨骼、IK 与 Morph 定义，不包含角色网格或贴图。
+包内包含无角色网格的标准 MMD Humanoid 参考骨架：`Editor/MotionConverter/Model/_model.pmx`。该文件仅保留转换流程所需的骨骼、IK 与 Morph 定义，不包含角色网格或贴图。
 
-生成的参考 PMX 及其生成器采用 Apache License 2.0。对应许可证与声明位于 `Editor/VmdMotionConverter/Model/`。
+生成的参考 PMX 及其生成器采用 Apache License 2.0。对应许可证与声明位于 `Editor/MotionConverter/Model/`。
 
 ## 开源协议
 

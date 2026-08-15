@@ -14,7 +14,7 @@ using Debug = UnityEngine.Debug;
 internal static class VmdMotionConverter
 {
     internal const string DefaultModelPath =
-        "Packages/com.vrchat.mmd-playmode-preview/Editor/VmdMotionConverter/Model/_model.pmx";
+        "Packages/com.vrchat.mmd-playmode-preview/Editor/MotionConverter/Model/_model.pmx";
 
     private const float VmdFrameRate = 30f;
 
@@ -36,6 +36,71 @@ internal static class VmdMotionConverter
         internal PmxHumanoidAnimationClipBaker.PreparedMotion HumanoidMotion;
         internal List<VmdMotionConversionData.MorphRecord> Morphs;
     }
+
+    /// <summary>
+    /// Keeps PMX2FBX batch implementation details inside MotionConverter so feature pages do
+    /// not depend on an individual PMX baker class.
+    /// </summary>
+    internal sealed class ManagedBatchSession : IDisposable
+    {
+        private PmxHumanoidAnimationClipBaker.BatchSession session;
+
+        internal ManagedBatchSession(PmxModel model, PmxAnimationClipBakerOptions options)
+        {
+            session = new PmxHumanoidAnimationClipBaker.BatchSession(model, options);
+        }
+
+        internal PmxHumanoidAnimationClipBaker.PreparedMotion Prepare(
+            VmdMotion motion, int maximumParallelism = 0,
+            Action<int, int> progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            EnsureActive();
+            return session.Prepare(
+                motion, maximumParallelism, progress, cancellationToken);
+        }
+
+        internal PmxAnimationBakeReport Bake(
+            VmdMotion motion, Transform morphTargetRoot = null,
+            Action<float, string> progress = null)
+        {
+            EnsureActive();
+            return session.Bake(motion, morphTargetRoot, progress);
+        }
+
+        internal PmxAnimationBakeReport Bake(
+            PmxHumanoidAnimationClipBaker.PreparedMotion prepared,
+            Transform morphTargetRoot = null,
+            Action<float, string> progress = null)
+        {
+            EnsureActive();
+            return session.Bake(prepared, morphTargetRoot, progress);
+        }
+
+        internal PmxAnimationBakeReport BakeTargetHumanoid(
+            PmxHumanoidAnimationClipBaker.PreparedMotion prepared,
+            GameObject targetRoot,
+            Action<float, string> progress = null)
+        {
+            EnsureActive();
+            return session.BakeTargetHumanoid(prepared, targetRoot, progress);
+        }
+
+        private void EnsureActive()
+        {
+            if (session == null) throw new ObjectDisposedException(nameof(ManagedBatchSession));
+        }
+
+        public void Dispose()
+        {
+            if (session == null) return;
+            session.Dispose();
+            session = null;
+        }
+    }
+
+    internal static int ManagedDefaultParallelism =>
+        PmxHumanoidAnimationClipBaker.DefaultParallelism;
 
     internal static string GetDataPath(string vmdPath, string destinationFolder = null)
     {
@@ -114,7 +179,7 @@ internal static class VmdMotionConverter
         float curveReductionError,
         Func<string, string, string, bool> confirmOverwrite,
         VmdMotionConversionScheme conversionScheme,
-        PmxHumanoidAnimationClipBaker.BatchSession batchSession = null,
+        ManagedBatchSession batchSession = null,
         bool deferAssetImport = false,
         string destinationFolder = null,
         string expressionVmdPath = null)
@@ -176,7 +241,7 @@ internal static class VmdMotionConverter
     internal static ManagedPreparedConversion PrepareManagedConversion(
         string physicalVmdPath,
         string physicalExpressionVmdPath,
-        PmxHumanoidAnimationClipBaker.BatchSession batchSession,
+        ManagedBatchSession batchSession,
         int maximumParallelism,
         Action<int, int> threadSafeProgress,
         CancellationToken cancellationToken)
@@ -205,7 +270,7 @@ internal static class VmdMotionConverter
     internal static VmdMotionConversionData CommitManagedConversion(
         string vmdPath,
         ManagedPreparedConversion prepared,
-        PmxHumanoidAnimationClipBaker.BatchSession batchSession,
+        ManagedBatchSession batchSession,
         VmdMotionConversionScheme conversionScheme,
         bool deferAssetImport,
         Action<float, string> progress,
@@ -228,7 +293,7 @@ internal static class VmdMotionConverter
 
     internal static AnimationClip BakeManagedSourceClip(
         ManagedPreparedConversion prepared,
-        PmxHumanoidAnimationClipBaker.BatchSession batchSession,
+        ManagedBatchSession batchSession,
         Action<float, string> progress)
     {
         if (prepared == null) throw new ArgumentNullException(nameof(prepared));
@@ -239,7 +304,7 @@ internal static class VmdMotionConverter
 
     internal static AnimationClip BakeManagedTargetHumanoidSourceClip(
         ManagedPreparedConversion prepared,
-        PmxHumanoidAnimationClipBaker.BatchSession batchSession,
+        ManagedBatchSession batchSession,
         GameObject targetModel,
         Action<float, string> progress)
     {
@@ -321,7 +386,7 @@ internal static class VmdMotionConverter
         return AssetDatabase.LoadAssetAtPath<VmdMotionConversionData>(dataPath);
     }
 
-    internal static PmxHumanoidAnimationClipBaker.BatchSession CreateManagedBatchSession(
+    internal static ManagedBatchSession CreateManagedBatchSession(
         string modelAssetPath, float curveReductionError,
         bool targetUpperLimbInverseSolve = false)
     {
@@ -329,12 +394,11 @@ internal static class VmdMotionConverter
             !modelAssetPath.EndsWith(".pmx", StringComparison.OrdinalIgnoreCase))
             throw new NotSupportedException("The built-in C# parser supports PMX models only.");
         PmxModel model = PmxModelCache.Load(modelAssetPath);
-        return new PmxHumanoidAnimationClipBaker.BatchSession(
+        return new ManagedBatchSession(
             model,
             CreateManagedBakeOptions(
                 Mathf.Clamp(curveReductionError, 0f, 0.001f),
-                targetUpperLimbInverseSolve),
-            true);
+                targetUpperLimbInverseSolve));
     }
 
     internal static List<GameObject> FindPipelineModels()
@@ -460,7 +524,8 @@ internal static class VmdMotionConverter
         Func<string, string, string, bool> confirmOverwrite,
         Action<float, string> progress,
         AnimationClip sourceClipOverride = null,
-        string outputFolder = null)
+        string outputFolder = null,
+        bool deferAssetImport = false)
     {
         if (data == null || model == null || modelMapping == null)
             throw new InvalidOperationException("Select a converted VMD and a model first.");
@@ -506,6 +571,8 @@ internal static class VmdMotionConverter
 
         var morphByName = data.morphs.ToDictionary(morph => morph.name, StringComparer.Ordinal);
         int mappingCount = modelMapping.mappings.Count;
+        var morphBindings = new List<EditorCurveBinding>(mappingCount);
+        var morphCurves = new List<AnimationCurve>(mappingCount);
         for (int mappingIndex = 0; mappingIndex < mappingCount; mappingIndex++)
         {
             VmdMotionConversionData.MorphMapping mapping = modelMapping.mappings[mappingIndex];
@@ -530,16 +597,25 @@ internal static class VmdMotionConverter
                 mapping.targetPath ?? string.Empty,
                 typeof(SkinnedMeshRenderer),
                 "blendShape." + mapping.target);
-            AnimationUtility.SetEditorCurve(clip, binding, new AnimationCurve(keys));
+            morphBindings.Add(binding);
+            morphCurves.Add(new AnimationCurve(keys));
             progress?.Invoke(
                 0.2f + 0.65f * (mappingIndex + 1f) / Mathf.Max(1, mappingCount),
                 $"Writing morph curves {mappingIndex + 1}/{mappingCount}");
         }
+        if (morphBindings.Count > 0)
+            AnimationUtility.SetEditorCurves(
+                clip, morphBindings.ToArray(), morphCurves.ToArray());
 
         progress?.Invoke(0.9f, "Saving AnimationClip asset");
         EnsureAssetFolderExists(Path.GetDirectoryName(outputPath)?.Replace('\\', '/'));
         AssetDatabase.DeleteAsset(outputPath);
         AssetDatabase.CreateAsset(clip, outputPath);
+        if (deferAssetImport)
+        {
+            progress?.Invoke(1f, "Animation export queued for batch import");
+            return clip;
+        }
         AssetDatabase.SaveAssets();
         progress?.Invoke(0.96f, "Importing AnimationClip asset");
         AssetDatabase.ImportAsset(outputPath, ImportAssetOptions.ForceSynchronousImport);
@@ -701,7 +777,7 @@ internal static class VmdMotionConverter
         string modelAssetPath,
         ModelParserMethod parserMethod,
         float curveReductionError,
-        PmxHumanoidAnimationClipBaker.BatchSession batchSession,
+        ManagedBatchSession batchSession,
         out VmdMotion parsedMotion)
     {
         parsedMotion = null;
@@ -740,7 +816,7 @@ internal static class VmdMotionConverter
         string vmdAssetPath,
         string modelAssetPath,
         float curveReductionError,
-        PmxHumanoidAnimationClipBaker.BatchSession batchSession,
+        ManagedBatchSession batchSession,
         out VmdMotion motion)
     {
         if (!modelAssetPath.EndsWith(".pmx", StringComparison.OrdinalIgnoreCase))
@@ -790,7 +866,7 @@ internal static class VmdMotionConverter
             CoordinateConversion = PmxCoordinateConversion.RotateY180,
             BakeMorphs = false,
             CurveReductionError = curveReductionError,
-            TargetUpperLimbInverseSolve = targetUpperLimbInverseSolve
+            DebugTargetUpperLimbInverseSolve = targetUpperLimbInverseSolve
         };
     }
 

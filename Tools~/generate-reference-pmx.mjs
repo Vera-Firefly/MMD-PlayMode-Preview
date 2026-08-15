@@ -414,7 +414,7 @@ function verifyPmx(buffer) {
 }
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
-const defaultOutput = path.resolve(scriptDirectory, "../Editor/VmdMotionConverter/Model/_model.pmx");
+const defaultOutput = path.resolve(scriptDirectory, "../Editor/MotionConverter/Model/_model.pmx");
 const outputPath = path.resolve(process.argv[2] ?? defaultOutput);
 const data = generatePmx();
 const summary = verifyPmx(data);
