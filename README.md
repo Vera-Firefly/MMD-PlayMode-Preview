@@ -2,90 +2,39 @@
 
 [简体中文](README-ZH-rCN.md)
 
-MMD Play Mode Preview is a Unity Editor package for previewing MMD motion on VRChat avatars and converting MMD motion, camera, and pose data into Unity `AnimationClip` assets.
-
-The package provides a managed C# PMX/VMD/VPD pipeline, MMD bone evaluation and IK solving, Humanoid animation baking, target-avatar calibration, morph conversion, camera conversion, and PMX parse caching. Conversion runs inside the Unity Editor without launching an external converter.
-
-## Requirements
-
-- Unity 2022.3
-- VRChat SDK - Avatars
-- Gesture Manager 3.9.8 (declared as package dependency)
+Preview VRChat avatar motion, camera animation, and audio in Unity Play Mode. Current version: **3.0.0-pre**.
 
 ## Features
 
-### Play Mode preview
+- Play, pause, end, reset, seek, and loop existing AnimationClips with synchronized audio and camera animation.
+- Adjust playback speed from **0.1× to 3×**, with **0.1×, 0.2×, 0.5×, 1×, and 2×** presets. Audio pitch changes with playback speed.
+- Use camera animation or free camera controls, with an optional image or solid-color background.
+- Record **60 fps MP4** at the current camera aspect ratio and native image size, up to 1080p, with synchronized audio. Pauses are excluded from the video.
+- Compress recordings in the background while keeping the original file. Open the last output location from the panel.
+- Optionally feed preview audio to AudioLink for compatible material effects, including during recording.
+- Use the panel in Simplified Chinese, English, or Japanese.
 
-- Preview an avatar with motion, facial morphs, audio, and camera animation.
-- Select motion, audio, or camera as the playback-duration source.
-- Looping and playback controls in Play Mode.
-- Optional image or color background.
-- Animated MMD camera or free-camera controls.
-- Embedded Gesture Manager integration.
-- Simplified Chinese, English, and Japanese Editor UI.
+## Dependencies
 
-### VMD motion conversion
+- **Unity 2022.3** and the **VRChat SDK for Avatars**.
+- **Gesture Manager 3.9.8**, declared as a package dependency. The preview panel configures it for the selected avatar.
+- Existing motion and camera **AnimationClips** and an optional **AudioClip**. Convert VMD files beforehand with a separate converter; VMD Converter Window and VMD Converter Core are not required by this package.
+- Video recording and compression use the bundled **Windows x64 FFmpeg 8.0**, including libx264. No separate installation or PATH configuration is required. Recording currently supports the **Built-in Render Pipeline**. If FFmpeg is missing or the editor platform is unsupported, recording and compression are disabled; other preview features remain available.
+- **AudioLink is optional**. Without it, AudioLink Integration is disabled and other features remain available. To enable integration for a session, the hierarchy must contain an active, enabled AudioLink component **before entering Play Mode**. AudioLink-aware materials must have their effects enabled; for lilToon, disable **AudioLink As Local**.
 
-- Batch conversion of multiple `.vmd` files to Unity `.anim` assets.
-- Combines motion data and optional facial-expression data.
-- Outputs standard Humanoid or target-calibrated Humanoid curves.
-- Evaluates PMX bone inheritance, MMD IK, leg/toe IK, and morph tracks.
-- Supports a built-in standard MMD reference PMX or a user-selected PMX model.
-- Curve reduction and PMX parse caching for repeated conversions.
+The preview package uses the [Apache-2.0 license](LICENSE). Bundled FFmpeg has its own [GPL v3 license](Editor/Tools/FFmpeg~/Windows/x86_64/LICENSE.txt) and [upstream notices](Editor/Tools/FFmpeg~/README.md). Keep the bundled tool directory and notices when distributing the package.
 
-### VMD camera conversion
+## Usage
 
-- Converts MMD camera tracks into Unity camera animation clips.
-- Preserves camera position, rotation, distance, field of view, and perspective state.
+1. Install the package and its required dependencies. Add the included **MMD Play Mode Preview** prefab, or use **VeraFirefly > MMD Play Mode Preview > Create MMD Play Mode Preview**.
+2. Select an active scene avatar with a VRC Avatar Descriptor. Assign motion, audio, and camera clips as needed, then select the clip that determines playback duration. Configure the background if desired.
+3. Click **Enter Play Mode Preview** in the component panel. Use this button to start the preview session; the panel remains disabled in Play sessions started elsewhere.
+4. Adjust Playback Settings and use the playback controls to play, pause, reset, seek, or end. While recording, speed is locked, including during pauses; loop, reset, and seeking are disabled.
 
-### VPD pose conversion
+For free camera control, hold the right mouse button to rotate; use **W/A/S/D** to move, **Q/E** for down/up, and the wheel to adjust movement speed. Hold the middle mouse button to rotate, and use the wheel to adjust distance. Enable **Free Camera Control** to switch away from camera animation.
 
-- Converts `.vpd` pose files into Unity `.anim` assets.
-- Supports standard Humanoid and target-calibrated Humanoid output.
-- Uses the same PMX retargeting and calibration path as VMD motion conversion.
+To record, end playback first, enable **Record Video**, and choose an output folder with the folder icon. **Play** starts recording, **Pause** suspends it, and **Play** resumes the same file. **End** or playback completion saves the MP4. Enable **Compress After Recording**, or click **Compress Last Output (FFmpeg)** afterward. **Last Output** is read-only; its folder icon opens the output location.
 
-### Package self-check
+Recording advances frame by frame and may run slower than real time in complex scenes. Audio monitoring is muted during capture; the output includes the synchronized clip audio. Set the AudioClip Load Type to **Decompress On Load** and wait for loading to finish. The recorded audio excludes microphones, other scene sources, and AudioMixer effects. Compression creates a separate file and may offer little reduction for already compressed video.
 
-- Verifies package contents against a complete package manifest.
-- Reports unexpected or missing files immediately in the Unity Editor.
-- Unexpected files can be moved safely to a recoverable quarantine under `Assets/MMDPlayModePreview_Quarantine`.
-
-## Quick start
-
-1. Open `VeraFirefly > MMD Play Mode Preview > Create MMD Play Mode Preview`.
-2. Select the created GameObject and choose an active VRChat avatar in its Inspector.
-3. Open the converter from the Inspector, or use `VeraFirefly > MMD Play Mode Preview > VMD Converter`.
-4. Add VMD/VPD files, select the output type and target Avatar when needed, then click **Convert**.
-5. Assign the generated motion and camera clips, plus optional audio and background.
-6. Click **Enter Play Mode Preview**.
-
-Free-camera controls: hold the right mouse button to look around, use `W/A/S/D` to move, `Q/E` to move vertically, and the mouse wheel to adjust movement speed. Hold the middle mouse button to rotate around the avatar and use the wheel to adjust distance.
-
-## Installation
-
-Install the package through the VRChat Creator Companion or Unity Package Manager according to the distribution method of the repository. When installing from a Git repository, use Unity Package Manager's **Add package from git URL** option and the repository URL or package subdirectory URL provided by the release.
-
-Do not merge unrelated files into the package directory. The package self-check treats files not present in its manifest as unexpected content.
-
-## Notes
-
-- The managed converter accepts PMX reference models. PMD is not supported by the built-in C# parser.
-- Target-calibrated Humanoid output performs an additional `HumanPoseHandler` calibration against the selected target Avatar. It is normally slower than standard Humanoid output but better matches the target rig.
-- Conversion accuracy depends on the source motion, PMX skeleton, Humanoid mapping, rest pose, and target Avatar configuration.
-- Use only MMD models, motions, poses, audio, and other assets whose licenses permit your intended use.
-
-## Bundled reference rig
-
-The package includes a mesh-free standard MMD Humanoid reference rig at `Editor/MotionConverter/Model/_model.pmx`. It contains the bone, IK, and morph definitions required by the conversion pipeline and no character mesh or textures.
-
-The generated reference PMX and its generator are licensed under the Apache License 2.0. Their license and notices are located in `Editor/MotionConverter/Model/`.
-
-## License
-
-MMD Play Mode Preview is licensed under the [Apache License 2.0](LICENSE).
-
-This license applies to the package itself. MMD models, motions, poses, audio, images, and other content imported or converted by users retain their respective licenses and are not relicensed by this project.
-
-## Author
-
-VeraFirefly
+To use AudioLink, place and activate its component before entering Play Mode, then enable **AudioLink Integration** in Playback Settings. The switch defaults to off: the detected AudioLink object is inactive while off, and activates with the preview audio source when enabled. Leaving preview restores its original activation and audio settings. AudioLink added or activated after Play begins is not eligible until the next session. Keep one active AudioLink analyzer in the scene; if several exist, the preview uses the first detected component.

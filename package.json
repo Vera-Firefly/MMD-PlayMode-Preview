@@ -1,10 +1,10 @@
 {
-  "name": "com.vrchat.mmd-playmode-preview",
+  "name": "com.verafirefly.mmd-playmode-preview",
   "displayName": "MMD Play Mode Preview",
-  "version": "2.8.0",
+  "version": "3.0.0-pre",
   "unity": "2022.3",
   "license": "Apache-2.0",
-  "description": "Play Mode avatar preview with VMD camera conversion and managed PMX/VMD motion conversion, IK solving, Humanoid baking, and PMX parse caching.",
+  "description": "Play Mode preview of VMD clips on VRChat avatars.",
   "author": {
     "name": "VeraFirefly"
   },

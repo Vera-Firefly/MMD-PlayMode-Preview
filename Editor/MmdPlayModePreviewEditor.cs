@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using Unity.Profiling;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UIElements;
@@ -9,19 +10,29 @@ using AvatarDescriptor = VRC.SDKBase.VRC_AvatarDescriptor;
 [CustomEditor(typeof(MmdPlayModePreview))]
 public sealed class MmdPlayModePreviewEditor : Editor
 {
-    private const string PackageRoot = "Packages/com.vrchat.mmd-playmode-preview";
+    private const string PackageRoot = "Packages/com.verafirefly.mmd-playmode-preview";
     private const string PreviewScriptPath = PackageRoot + "/Runtime/MmdPlayModePreview.cs";
     private const string PreviewIconPath = PackageRoot + "/Editor/Icon/icon.png";
     private const string AuthorName = "VeraFirefly";
     private const string LanguagePreference = "MmdPlayModePreview.Language";
     private readonly List<AvatarDescriptor> avatars = new List<AvatarDescriptor>();
     private int avatarIndex = -1;
+    private string[] avatarNames;
+    private bool avatarListDirty;
     private VisualElement inspectorRoot;
+    private IMGUIContainer previewInspector;
+    private IVisualElementScheduledItem inspectorRefresh;
     private VisualElement gestureManagerHost;
     private Editor gestureManagerEditor;
     private Component gestureManagerTarget;
     private Component requestedGestureManagerTarget;
     private bool gestureManagerSyncScheduled;
+    private Component configuredGestureManager;
+    private GameObject configuredGestureAvatar;
+    private static readonly ProfilerMarker InspectorMarker = new ProfilerMarker("MMDPreview.Inspector");
+    private static readonly ProfilerMarker BuildCurvesMarker = new ProfilerMarker("MMDPreview.BuildTransformCurves");
+    private static string cachedPackageVersion;
+    private static EditorLanguage? cachedLanguage;
     private static GUIStyle clearButtonStyle;
     private static GUIStyle titleStyle;
     private static GUIStyle versionStyle;
@@ -68,16 +79,29 @@ public sealed class MmdPlayModePreviewEditor : Editor
 
     private static EditorLanguage Language
     {
-        get => (EditorLanguage)EditorPrefs.GetInt(
+        get => cachedLanguage ?? (cachedLanguage = (EditorLanguage)EditorPrefs.GetInt(
             LanguagePreference,
-            (int)EditorLanguage.SimplifiedChinese);
-        set => EditorPrefs.SetInt(LanguagePreference, (int)value);
+            (int)EditorLanguage.SimplifiedChinese)).Value;
+        set
+        {
+            cachedLanguage = value;
+            EditorPrefs.SetInt(LanguagePreference, (int)value);
+        }
     }
 
     public override VisualElement CreateInspectorGUI()
     {
+        inspectorRefresh?.Pause();
         inspectorRoot = new VisualElement();
-        inspectorRoot.Add(new IMGUIContainer(OnInspectorGUI));
+        previewInspector = new IMGUIContainer(OnInspectorGUI);
+        inspectorRoot.Add(previewInspector);
+        // Refresh only our controls at 10 Hz. Repaint() from OnInspectorGUI
+        // continuously invalidated the entire Inspector, including Gesture Manager.
+        // UI Toolkit suspends this schedule while the Inspector is detached.
+        inspectorRefresh = previewInspector.schedule.Execute(() =>
+        {
+            if (Application.isPlaying) previewInspector.MarkDirtyRepaint();
+        }).Every(100);
         gestureManagerHost = new VisualElement();
         inspectorRoot.Add(gestureManagerHost);
         return inspectorRoot;
@@ -97,14 +121,29 @@ public sealed class MmdPlayModePreviewEditor : Editor
         ForceEnabled();
         ApplyScriptIcon();
         ScanAvatars();
+        EditorApplication.hierarchyChanged += OnHierarchyChanged;
     }
 
     private void OnDisable()
     {
+        EditorApplication.hierarchyChanged -= OnHierarchyChanged;
         DisposeEmbeddedGestureManager();
     }
 
+    private void OnHierarchyChanged()
+    {
+        // The runtime locks the selected avatar throughout a preview session.
+        if (Application.isPlaying) return;
+        avatarListDirty = true;
+        Repaint();
+    }
+
     public override void OnInspectorGUI()
+    {
+        using (InspectorMarker.Auto()) DrawInspector();
+    }
+
+    private void DrawInspector()
     {
         var preview = (MmdPlayModePreview)target;
         ForceEnabled();
@@ -121,7 +160,7 @@ public sealed class MmdPlayModePreviewEditor : Editor
             return;
         }
 
-        ScanAvatars();
+        if (avatarListDirty && !Application.isPlaying) ScanAvatars();
         serializedObject.Update();
 
         BeginColoredSection(L("模型预览", "Model Preview", "モデルプレビュー"), new Color(0.16f, 0.38f, 0.72f));
@@ -181,13 +220,14 @@ public sealed class MmdPlayModePreviewEditor : Editor
                     L("镜头", "Camera", "カメラ")
                 });
         }
-        EditorGUILayout.PropertyField(
-            serializedObject.FindProperty("loopPlayback"),
-            new GUIContent(L("循环播放", "Loop Playback", "ループ再生")));
+        SerializedProperty recordVideo = serializedObject.FindProperty("recordVideo");
+        if (!preview.IsRecording && !MmdPreviewVideoRecorder.IsEncoderAvailable) recordVideo.boolValue = false;
+        SerializedProperty loopPlayback = serializedObject.FindProperty("loopPlayback");
+        if (recordVideo.boolValue) loopPlayback.boolValue = false;
+        using (new EditorGUI.DisabledScope(recordVideo.boolValue))
+            EditorGUILayout.PropertyField(loopPlayback,
+                new GUIContent(L("循环播放", "Loop Playback", "ループ再生")));
 
-        if (!Application.isPlaying && GUILayout.Button(
-                L("打开 VMD Converter", "Open VMD Converter", "VMD Converter を開く")))
-            MainConverterWindow.OpenFor(preview);
         EndColoredSection();
 
         BeginColoredSection("Camera", new Color(0.12f, 0.56f, 0.42f));
@@ -211,6 +251,7 @@ public sealed class MmdPlayModePreviewEditor : Editor
                 new GUIContent(L("移动速度", "Move Speed", "移動速度")));
         }
         EndColoredSection();
+        if (Application.isPlaying) DrawPlaybackSettings(preview);
         serializedObject.ApplyModifiedProperties();
 
         if (Application.isPlaying && preview.HasPlaybackContent)
@@ -219,8 +260,6 @@ public sealed class MmdPlayModePreviewEditor : Editor
             DrawPlaybackControls(preview);
             EndColoredSection();
         }
-        if (Application.isPlaying) Repaint();
-
         if (Application.isPlaying) UpdateEmbeddedGestureManager(preview);
         else ClearEmbeddedGestureManager();
 
@@ -313,9 +352,11 @@ public sealed class MmdPlayModePreviewEditor : Editor
 
     private static string GetPackageVersion()
     {
+        if (cachedPackageVersion != null) return cachedPackageVersion;
         UnityEditor.PackageManager.PackageInfo package =
             UnityEditor.PackageManager.PackageInfo.FindForAssetPath(PackageRoot);
-        return string.IsNullOrWhiteSpace(package?.version) ? "Unknown" : package.version;
+        cachedPackageVersion = string.IsNullOrWhiteSpace(package?.version) ? "Unknown" : package.version;
+        return cachedPackageVersion;
     }
 
     private static string L(string chinese, string english, string japanese)
@@ -447,11 +488,12 @@ public sealed class MmdPlayModePreviewEditor : Editor
                 if (preview.IsPlaybackPlaying) preview.PausePreview();
                 else preview.PlayPreview();
             }
-            if (GUILayout.Button(
-                    GetIconContent("Animation.FirstKey", "↶", L("重置到开头", "Reset to Start", "先頭に戻す")),
-                    GUILayout.Width(36f),
-                    GUILayout.Height(26f)))
-                preview.ResetPreview();
+            using (new EditorGUI.DisabledScope(preview.IsRecording))
+                if (GUILayout.Button(
+                        GetIconContent("Animation.FirstKey", "↶", L("重置到开头", "Reset to Start", "先頭に戻す")),
+                        GUILayout.Width(36f),
+                        GUILayout.Height(26f)))
+                    preview.ResetPreview();
             using (new EditorGUI.DisabledScope(preview.IsPlaybackEnded))
                 if (GUILayout.Button(
                         GetIconContent("winbtn_win_close", "■", L("结束动作", "End Motion", "モーション終了")),
@@ -464,9 +506,12 @@ public sealed class MmdPlayModePreviewEditor : Editor
         if (!preview.IsPlaybackEnded)
         {
             float duration = Mathf.Max(0f, preview.PlaybackDuration);
-            EditorGUI.BeginChangeCheck();
-            float time = EditorGUILayout.Slider(preview.PlaybackTime, 0f, duration);
-            if (EditorGUI.EndChangeCheck()) preview.SeekPreview(time);
+            using (new EditorGUI.DisabledScope(preview.IsRecording))
+            {
+                EditorGUI.BeginChangeCheck();
+                float time = EditorGUILayout.Slider(preview.PlaybackTime, 0f, duration);
+                if (EditorGUI.EndChangeCheck()) preview.SeekPreview(time);
+            }
 
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -489,6 +534,107 @@ public sealed class MmdPlayModePreviewEditor : Editor
                 }
             }
         }
+    }
+
+    private void DrawPlaybackSettings(MmdPlayModePreview preview)
+    {
+        BeginColoredSection(L("播放设置", "Playback Settings", "再生設定"), new Color(0.2f, 0.48f, 0.65f));
+        SerializedProperty speed = serializedObject.FindProperty("playbackSpeed");
+        using (new EditorGUI.DisabledScope(preview.IsRecording))
+        {
+            speed.floatValue = EditorGUILayout.Slider(
+                L("播放倍速", "Playback Speed", "再生速度"), speed.floatValue, 0.1f, 3f);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                foreach (float preset in new[] { 0.1f, 0.2f, 0.5f, 1f, 2f })
+                    if (GUILayout.Button(preset.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "x", EditorStyles.miniButton))
+                        speed.floatValue = preset;
+            }
+        }
+
+        SerializedProperty recording = serializedObject.FindProperty("recordVideo");
+        SerializedProperty audioLink = serializedObject.FindProperty("enableAudioLink");
+        bool canConnectAudioLink = MmdPreviewAudioLink.IsAvailable && preview.audioLinkSessionTarget != null;
+        if (!canConnectAudioLink) audioLink.boolValue = false;
+        using (new EditorGUI.DisabledScope(!canConnectAudioLink))
+        {
+            EditorGUILayout.PropertyField(audioLink,
+                new GUIContent(L("AudioLink接入", "AudioLink Integration", "AudioLink 接続"),
+                    L("勾选以激活 AudioLink 并接入预览音频；关闭时停用 AudioLink 对象。", "Activate AudioLink and feed preview audio; deactivate its GameObject when off.", "AudioLink を有効にしてプレビュー音声を接続し、オフ時はオブジェクトを無効にします。")));
+        }
+        if (!MmdPreviewAudioLink.IsAvailable)
+            EditorGUILayout.HelpBox(L("未安装 AudioLink，接入功能不可用。", "AudioLink is not installed; integration is unavailable.", "AudioLink が未導入のため接続は無効です。"), MessageType.Info);
+        else if (!canConnectAudioLink)
+            EditorGUILayout.HelpBox(L("进入 Play 前未检测到激活且启用的 AudioLink 组件。", "No active, enabled AudioLink was found before Play Mode.", "Play 前に有効な AudioLink が検出されませんでした。"), MessageType.Info);
+        bool encoderAvailable = MmdPreviewVideoRecorder.IsEncoderAvailable;
+        if (!encoderAvailable && !preview.IsRecording) recording.boolValue = false;
+        using (new EditorGUI.DisabledScope(!encoderAvailable || !preview.IsPlaybackEnded || preview.IsRecording))
+            EditorGUILayout.PropertyField(recording,
+                new GUIContent(L("视频录制", "Record Video", "動画を録画")));
+        if (!encoderAvailable)
+            EditorGUILayout.HelpBox(L("内置 FFmpeg 不可用（随包提供 Windows x64 版本），录制和压缩已禁用，其它预览功能可正常使用。",
+                "Bundled FFmpeg is unavailable (Windows x64 included). Recording and compression are disabled; other preview features remain available.",
+                "内蔵 FFmpeg が利用できません（Windows x64 版を同梱）。録画と圧縮は無効ですが、他のプレビュー機能は利用できます。"), MessageType.Info);
+        if (recording.boolValue)
+        {
+            serializedObject.FindProperty("loopPlayback").boolValue = false;
+            using (new EditorGUI.DisabledScope(preview.IsRecording))
+                EditorGUILayout.PropertyField(serializedObject.FindProperty("compressRecordedVideo"),
+                    new GUIContent(L("录制后压缩", "Compress After Recording", "録画後に圧縮"),
+                        L("后台压缩为较小 MP4，保留原文件。", "Compress to a smaller MP4 in the background; keep the original.", "元の動画を残し、バックグラウンドで小さい MP4 に圧縮します。")));
+            SerializedProperty output = serializedObject.FindProperty("recordingOutputDirectory");
+            if (string.IsNullOrEmpty(output.stringValue))
+                output.stringValue = EditorPrefs.GetString(MmdPreviewVideoRecorder.OutputDirectoryPreference, "");
+            using (new EditorGUI.DisabledScope(preview.IsRecording))
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                EditorGUILayout.PrefixLabel(L("输出文件夹", "Output Folder", "出力フォルダー"));
+                EditorGUILayout.SelectableLabel(output.stringValue, EditorStyles.textField,
+                    GUILayout.Height(EditorGUIUtility.singleLineHeight));
+                if (GUILayout.Button(GetIconContent("Folder Icon", "▣",
+                        L("选择输出文件夹", "Select Output Folder", "出力フォルダーを選択")),
+                        GUILayout.Width(28f), GUILayout.Height(EditorGUIUtility.singleLineHeight)))
+                {
+                    string selected = EditorUtility.OpenFolderPanel(
+                        L("视频输出文件夹", "Video Output Folder", "動画の出力フォルダー"), output.stringValue, "");
+                    if (!string.IsNullOrEmpty(selected))
+                    {
+                        output.stringValue = selected;
+                        EditorPrefs.SetString(MmdPreviewVideoRecorder.OutputDirectoryPreference, selected);
+                    }
+                }
+            }
+            EditorGUILayout.HelpBox(preview.IsRecording
+                ? (preview.IsPlaybackPlaying
+                    ? L("正在逐帧录制（试听静音，成片含音轨）：暂停可暂存进度，结束后编码保存 MP4。", "Frame capture (monitor muted, audio included in output): Pause to suspend, End to encode MP4.", "フレーム録画中（試聴はミュート、動画には音声を保存）：一時停止で中断、終了で MP4 を保存。")
+                    : L("录制已暂停，点击播放继续写入同一个视频。", "Recording paused. Play resumes the same video.", "録画を一時停止中。再生で同じ動画に続けて録画します。"))
+                : L("MP4 · 60 fps · 当前画面尺寸（最高 1080p）。逐帧录制，试听静音，成片保留同步音轨。需 FFmpeg。播放开始，暂停不计入视频，结束后保存。录制期间锁定倍速、循环、重置和进度拖动。",
+                    "MP4 · 60 fps · Native size (up to 1080p). Frame capture; monitoring is muted, output includes synchronized audio. Requires FFmpeg. Play records, Pause omits idle time, End saves. Speed, loop, reset and seeking are locked.",
+                    "MP4・60 fps・現在の画面サイズ（最大 1080p）。フレーム録画、試聴はミュート、動画には同期音声を保存。FFmpeg が必要です。再生で録画、一時停止時間は除外、終了で保存。速度・ループ・リセット・シークは固定。"), MessageType.Info);
+        }
+        if (!string.IsNullOrEmpty(MmdPreviewVideoRecorder.LastError))
+            EditorGUILayout.HelpBox(MmdPreviewVideoRecorder.LastError, MessageType.Error);
+        if (!string.IsNullOrEmpty(MmdPreviewVideoRecorder.LastOutputPath))
+        {
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                using (new EditorGUI.DisabledScope(true))
+                    EditorGUILayout.TextField(L("上次输出", "Last Output", "前回の出力"),
+                        MmdPreviewVideoRecorder.LastOutputPath);
+                if (GUILayout.Button(GetIconContent("Folder Icon", "▣",
+                        L("打开所在位置", "Show in Folder", "保存先を開く")),
+                        GUILayout.Width(28f), GUILayout.Height(EditorGUIUtility.singleLineHeight)))
+                    EditorUtility.RevealInFinder(MmdPreviewVideoRecorder.LastOutputPath);
+            }
+            using (new EditorGUI.DisabledScope(!encoderAvailable || preview.IsRecording || MmdPreviewVideoRecorder.IsCompressing))
+                if (GUILayout.Button(L("压缩上次输出 (FFmpeg)", "Compress Last Output (FFmpeg)", "前回の動画を圧縮 (FFmpeg)")))
+                    MmdPreviewVideoRecorder.CompressLastOutput();
+        }
+        if (MmdPreviewVideoRecorder.IsCompressing)
+            EditorGUILayout.HelpBox(L("正在后台压缩视频，完成后更新“上次输出”。原文件保留。",
+                "Compressing video in the background. Last Output updates on completion; the original is kept.",
+                "動画をバックグラウンドで圧縮中。完了後に出力先を更新します。元の動画は保存されます。"), MessageType.Info);
+        EndColoredSection();
     }
 
     private static PreviewMotionClipType DetectMotionClipType(AnimationClip clip)
@@ -551,7 +697,8 @@ public sealed class MmdPlayModePreviewEditor : Editor
         {
             sampledTransformClip = clip;
             sampledTransformAvatar = avatar;
-            sampledTransformCurves = BuildTransformCurveSets(clip, avatar.transform);
+            using (BuildCurvesMarker.Auto())
+                sampledTransformCurves = BuildTransformCurveSets(clip, avatar.transform);
         }
 
         for (int index = 0; index < sampledTransformCurves.Length; index++)
@@ -669,7 +816,12 @@ public sealed class MmdPlayModePreviewEditor : Editor
             return;
         }
 
-        ConfigureGestureManager(manager, preview.avatar);
+        if (configuredGestureManager != manager || configuredGestureAvatar != preview.avatar)
+        {
+            ConfigureGestureManager(manager, preview.avatar);
+            configuredGestureManager = manager;
+            configuredGestureAvatar = preview.avatar;
+        }
         RequestEmbeddedGestureManager(manager);
     }
 
@@ -710,6 +862,8 @@ public sealed class MmdPlayModePreviewEditor : Editor
 
     private void DisposeEmbeddedGestureManager()
     {
+        inspectorRefresh?.Pause();
+        inspectorRefresh = null;
         requestedGestureManagerTarget = null;
         gestureManagerTarget = null;
         gestureManagerSyncScheduled = false;
@@ -717,6 +871,9 @@ public sealed class MmdPlayModePreviewEditor : Editor
         gestureManagerEditor = null;
         gestureManagerHost = null;
         inspectorRoot = null;
+        previewInspector = null;
+        configuredGestureManager = null;
+        configuredGestureAvatar = null;
     }
 
     private static Component GetGestureManager(MmdPlayModePreview preview)
@@ -788,7 +945,7 @@ public sealed class MmdPlayModePreviewEditor : Editor
     private void DrawAvatarSelector(MmdPlayModePreview preview)
     {
         EditorGUILayout.BeginHorizontal();
-        string[] labels = BuildAvatarNames();
+        string[] labels = avatars.Count == 0 ? BuildAvatarNames() : avatarNames;
         using (new EditorGUI.DisabledScope(labels.Length == 0))
         {
             int nextIndex = EditorGUILayout.Popup(
@@ -824,6 +981,7 @@ public sealed class MmdPlayModePreviewEditor : Editor
 
     private void ScanAvatars()
     {
+        avatarListDirty = false;
         var preview = target as MmdPlayModePreview;
         avatars.Clear();
         foreach (AvatarDescriptor descriptor in Resources.FindObjectsOfTypeAll<AvatarDescriptor>())
@@ -832,6 +990,7 @@ public sealed class MmdPlayModePreviewEditor : Editor
             avatars.Add(descriptor);
         }
         avatars.Sort((left, right) => string.Compare(GetHierarchyPath(left.transform), GetHierarchyPath(right.transform), StringComparison.OrdinalIgnoreCase));
+        avatarNames = BuildAvatarNames();
         avatarIndex = avatars.FindIndex(descriptor => descriptor != null && preview != null && descriptor.gameObject == preview.avatar);
         if (avatarIndex < 0 && avatars.Count > 0)
         {
@@ -892,6 +1051,15 @@ internal static class MmdPlayModePreviewSession
 
     private static void OnPlayModeStateChanged(PlayModeStateChange state)
     {
+        if (state == PlayModeStateChange.ExitingEditMode)
+        {
+            Behaviour audioLink = MmdPreviewAudioLink.FindActiveSceneAudioLink();
+            foreach (MmdPlayModePreview preview in FindScenePreviews())
+            {
+                preview.audioLinkSessionTarget = audioLink;
+                preview.enableAudioLink = false;
+            }
+        }
         if (state == PlayModeStateChange.ExitingEditMode || state == PlayModeStateChange.EnteredPlayMode)
             ApplySessionAuthorization();
         else if (state == PlayModeStateChange.EnteredEditMode)
@@ -912,6 +1080,8 @@ internal static class MmdPlayModePreviewSession
             bool changed = preview.previewSessionAuthorized || preview.gestureManagerAutoAdded;
             preview.SetPreviewSessionActive(false);
             preview.previewSessionAuthorized = false;
+            preview.audioLinkSessionTarget = null;
+            preview.enableAudioLink = false;
             RemoveAutoAddedGestureManager(preview);
             if (changed) EditorUtility.SetDirty(preview);
         }

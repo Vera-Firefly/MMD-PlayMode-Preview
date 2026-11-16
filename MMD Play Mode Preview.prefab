@@ -52,6 +52,10 @@ MonoBehaviour:
   cameraAnimationClip: {fileID: 0}
   audioClip: {fileID: 0}
   loopPlayback: 1
+  playbackSpeed: 1
+  recordVideo: 0
+  compressRecordedVideo: 0
+  recordingOutputDirectory: 
   playbackDurationSource: 0
   gestureManager: {fileID: 0}
   previewSessionAuthorized: 0

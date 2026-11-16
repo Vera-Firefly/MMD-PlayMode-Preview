@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Unity.Profiling;
 using UnityEngine;
 using AvatarDescriptor = VRC.SDKBase.VRC_AvatarDescriptor;
 #if UNITY_EDITOR
@@ -20,6 +21,10 @@ public enum MmdPreviewDurationSource
 [DefaultExecutionOrder(32000)]
 public sealed class MmdPlayModePreview : MonoBehaviour
 {
+    private static readonly ProfilerMarker SampleMarker = new ProfilerMarker("MMDPreview.SampleAnimation");
+    private static readonly ProfilerMarker TransformSampleMarker = new ProfilerMarker("MMDPreview.SampleTransformCurves");
+    private static readonly ProfilerMarker CameraSampleMarker = new ProfilerMarker("MMDPreview.SampleCamera");
+    private static readonly ProfilerMarker AudioSyncMarker = new ProfilerMarker("MMDPreview.SyncAudio");
 #if UNITY_EDITOR
     /// <summary>
     /// Editor-only fallback for FK/Transform clips on Humanoid Animators. Unity's
@@ -28,6 +33,12 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     /// direct-curve sampler during Play Mode.
     /// </summary>
     public static Func<AnimationClip, GameObject, float, bool> EditorTransformClipSampler;
+    internal static Func<MmdPlayModePreview, bool> EditorStartRecording;
+    internal static Func<bool> EditorIsRecordingAvailable;
+    internal static Action<MmdPlayModePreview, float, float> EditorCaptureRecordingFrame;
+    internal static Action<MmdPlayModePreview> EditorStopRecording;
+    internal static Action<MmdPlayModePreview> EditorUpdateAudioLink;
+    internal static Action<MmdPlayModePreview> EditorReleaseAudioLink;
 #endif
 
     [Header("Preview")]
@@ -40,11 +51,17 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     public AnimationClip cameraAnimationClip;
     public AudioClip audioClip;
     public bool loopPlayback = true;
+    [Range(0.1f, 3f)] public float playbackSpeed = 1f;
+    public bool recordVideo;
+    public bool compressRecordedVideo;
+    public string recordingOutputDirectory = "";
     public MmdPreviewDurationSource playbackDurationSource = MmdPreviewDurationSource.Animation;
 
     [HideInInspector] public Component gestureManager;
     [HideInInspector] public bool previewSessionAuthorized;
     [HideInInspector] public bool gestureManagerAutoAdded;
+    [HideInInspector] public Behaviour audioLinkSessionTarget;
+    [HideInInspector] public bool enableAudioLink;
 
     public bool freeCameraControl;
     public Vector3 cameraPosition = Vector3.zero;
@@ -71,6 +88,16 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     private float animationTime;
     private bool playbackPlaying;
     private bool playbackEnded;
+    private bool recordingActive;
+    private bool endingPreview;
+    private float recordingSpeed;
+    private float recordingStartTime;
+    private long recordingFrameIndex;
+    private int lastRecordedUnityFrame = -1;
+    private bool recordingTargetWarmedUp;
+    private bool recordingFramePending;
+    private float pendingRecordingTime;
+    public const int RecordingFrameRate = 60;
     private bool previewSessionActive;
     private Vector3 cameraFocus;
     private float cameraExtent = 1f;
@@ -123,14 +150,19 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         InitializeCameraFocus();
         InitializeCameraSettings();
         UpdatePreviewBackground();
+        RefreshRecordingAvailability();
+        if (recordVideo) loopPlayback = false;
+        playbackSpeed = Mathf.Clamp(playbackSpeed, 0.1f, 3f);
         previewAudio = gameObject.AddComponent<AudioSource>();
         previewAudio.playOnAwake = false;
         previewAudio.loop = loopPlayback;
         previewAudio.clip = audioClip;
+        previewAudio.pitch = PlaybackSpeed;
         playbackPlaying = false;
         playbackEnded = true;
         freeCameraControl = true;
         previousCameraAnimationMode = IsCameraAnimationMode;
+        Camera.onPostRender += OnPreviewCameraRendered;
     }
 
     private void Update()
@@ -141,6 +173,10 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         if (avatar != lockedAvatar) avatar = lockedAvatar;
         if (avatar == null || previewCamera == null) return;
 
+        FlushRenderedRecordingFrame();
+
+        RefreshRecordingAvailability();
+        if (recordVideo) loopPlayback = false;
         UpdatePreviewBackground();
 
         bool cameraAnimationMode = IsCameraAnimationMode;
@@ -162,21 +198,45 @@ public sealed class MmdPlayModePreview : MonoBehaviour
             UpdateFreeCamera();
         }
         UpdateBackgroundPlane();
+        if (recordingActive && playbackPlaying)
+        {
+            animationTime = (float)(recordingStartTime +
+                (double)recordingFrameIndex * recordingSpeed / RecordingFrameRate);
+        }
     }
 
     private void LateUpdate()
     {
+#if UNITY_EDITOR
+        if (previewSessionActive) EditorUpdateAudioLink?.Invoke(this);
+#endif
         if (!previewSessionActive || avatar == null || playbackEnded || !HasPlaybackContent) return;
 
-        if (previewAudio != null) previewAudio.loop = loopPlayback;
+        if (previewAudio != null)
+        {
+            previewAudio.loop = loopPlayback && !recordVideo;
+            previewAudio.pitch = PlaybackSpeed;
+        }
+        if (recordingActive)
+        {
+            if (playbackPlaying && animationTime >= PlaybackDuration) EndPreview();
+            else
+            {
+                // Animator/Gesture Manager run after Update. Apply the final pose
+                // here, just as normal preview does, before camera rendering.
+                SamplePreview(animationTime);
+                UpdateBackgroundPlane();
+            }
+            return;
+        }
         if (playbackPlaying)
         {
-            animationTime += Time.deltaTime;
+            animationTime += Time.deltaTime * PlaybackSpeed;
 
             float duration = PlaybackDuration;
             if (duration > 0f && animationTime >= duration)
             {
-                if (loopPlayback)
+                if (loopPlayback && !recordVideo)
                 {
                     animationTime %= duration;
                     SyncAudio(true);
@@ -199,6 +259,10 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     public bool IsPlaybackPlaying => playbackPlaying;
 
     public bool IsPlaybackEnded => playbackEnded;
+    public bool IsRecording => recordingActive;
+    public float PlaybackSpeed => recordingActive ? recordingSpeed : Mathf.Clamp(playbackSpeed, 0.1f, 3f);
+    public Camera PreviewCamera => previewCamera;
+    internal AudioSource PreviewAudioSource => previewAudio;
 
     public bool IsPreviewSessionActive => previewSessionActive || previewSessionAuthorized;
 
@@ -208,7 +272,14 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
     public void SetPreviewSessionActive(bool active)
     {
-        if (!active) RestorePlaybackState();
+        if (!active)
+        {
+#if UNITY_EDITOR
+            EditorReleaseAudioLink?.Invoke(this);
+#endif
+            StopRecording();
+            RestorePlaybackState();
+        }
         previewSessionActive = active;
     }
 
@@ -230,9 +301,40 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         }
     }
 
+    private void RefreshRecordingAvailability()
+    {
+#if UNITY_EDITOR
+        if (!recordingActive && (EditorIsRecordingAvailable == null || !EditorIsRecordingAvailable()))
+            recordVideo = false;
+#endif
+    }
+
     public void PlayPreview()
     {
         if (!previewSessionActive || !HasPlaybackContent || PlaybackDuration <= 0f) return;
+        if (playbackPlaying) return;
+        RefreshRecordingAvailability();
+        if (recordVideo)
+        {
+            loopPlayback = false;
+            if (!recordingActive)
+            {
+#if UNITY_EDITOR
+                if (EditorStartRecording == null || !EditorStartRecording(this)) return;
+                recordingSpeed = Mathf.Clamp(playbackSpeed, 0.1f, 3f);
+                recordingStartTime = playbackEnded ? 0f : animationTime;
+                recordingFrameIndex = 0;
+                // Switching the target during Inspector input may occur after
+                // culling. Let that Unity frame finish before accepting captures.
+                lastRecordedUnityFrame = Time.frameCount;
+                recordingTargetWarmedUp = false;
+                recordingFramePending = false;
+                recordingActive = true;
+#else
+                return;
+#endif
+            }
+        }
         if (playbackEnded)
         {
             CapturePlaybackState();
@@ -244,19 +346,25 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         if (!loopPlayback && animationTime >= PlaybackDuration) animationTime = 0f;
         ApplyAudioClip();
         playbackPlaying = true;
-        SyncAudio(true);
+        // Offline capture cannot provide continuous real-time audio monitoring.
+        if (recordingActive)
+        {
+            if (previewAudio != null) previewAudio.Stop();
+        }
+        else SyncAudio(true);
     }
 
     public void PausePreview()
     {
         if (!previewSessionActive) return;
+        FlushRenderedRecordingFrame();
         playbackPlaying = false;
         if (previewAudio != null) previewAudio.Pause();
     }
 
     public void ResetPreview()
     {
-        if (!previewSessionActive) return;
+        if (!previewSessionActive || recordingActive) return;
         CapturePlaybackState();
         playbackPlaying = false;
         playbackEnded = false;
@@ -273,7 +381,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
     public void SeekPreview(float time)
     {
-        if (!previewSessionActive) return;
+        if (!previewSessionActive || recordingActive) return;
         CapturePlaybackState();
         playbackEnded = false;
         animationTime = Mathf.Clamp(time, 0f, PlaybackDuration);
@@ -284,7 +392,11 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
     public void EndPreview()
     {
-        if (!previewSessionActive) return;
+        if (!previewSessionActive || endingPreview) return;
+        endingPreview = true;
+        FlushRenderedRecordingFrame();
+        if (previewAudio != null) previewAudio.Stop();
+        StopRecording();
         playbackPlaying = false;
         playbackEnded = true;
         animationTime = 0f;
@@ -298,6 +410,44 @@ public sealed class MmdPlayModePreview : MonoBehaviour
             previousCameraAnimationMode = false;
             UpdateBackgroundPlane();
         }
+        endingPreview = false;
+    }
+
+    private void OnPreviewCameraRendered(Camera camera)
+    {
+#if UNITY_EDITOR
+        if (camera != previewCamera || !recordingActive || !playbackPlaying ||
+            lastRecordedUnityFrame == Time.frameCount || animationTime >= PlaybackDuration) return;
+        lastRecordedUnityFrame = Time.frameCount;
+        if (!recordingTargetWarmedUp)
+        {
+            recordingTargetWarmedUp = true;
+            return;
+        }
+        // OnPostRender can run before the target resolve has completed. Read it
+        // at the next Update, before the camera can overwrite the finished frame.
+        recordingFramePending = true;
+        pendingRecordingTime = animationTime;
+#endif
+    }
+
+    private void FlushRenderedRecordingFrame()
+    {
+#if UNITY_EDITOR
+        if (!recordingActive || !recordingFramePending) return;
+        recordingFramePending = false;
+        EditorCaptureRecordingFrame?.Invoke(this, pendingRecordingTime, recordingSpeed);
+        if (recordingActive) recordingFrameIndex++;
+#endif
+    }
+
+    private void StopRecording()
+    {
+        if (!recordingActive) return;
+        recordingActive = false;
+#if UNITY_EDITOR
+        EditorStopRecording?.Invoke(this);
+#endif
     }
 
     private void SamplePreview(float time)
@@ -307,9 +457,10 @@ public sealed class MmdPlayModePreview : MonoBehaviour
             // Keep Unity sampling for Humanoid curves and blend shapes. The
             // editor fallback then reapplies raw FK Transform curves after it,
             // so an active Humanoid Animator cannot discard the bone pose.
-            animationClip.SampleAnimation(avatar, time);
+            using (SampleMarker.Auto()) animationClip.SampleAnimation(avatar, time);
 #if UNITY_EDITOR
-            EditorTransformClipSampler?.Invoke(animationClip, avatar, time);
+            using (TransformSampleMarker.Auto())
+                EditorTransformClipSampler?.Invoke(animationClip, avatar, time);
 #endif
         }
         if (IsCameraAnimationMode) SampleCameraAnimation(time);
@@ -318,22 +469,30 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     private void SampleCameraAnimation(float time)
     {
         if (cameraAnimationClip == null || previewCamera == null) return;
-        cameraAnimationClip.SampleAnimation(previewCamera.gameObject, time);
+        using (CameraSampleMarker.Auto())
+            cameraAnimationClip.SampleAnimation(previewCamera.gameObject, time);
         SynchronizeCameraSettingsFromTransform();
     }
 
     private void SyncAudio(bool play)
     {
+        using (AudioSyncMarker.Auto()) SyncAudioInternal(play);
+    }
+
+    private void SyncAudioInternal(bool play)
+    {
         if (previewAudio == null || previewAudio.clip == null) return;
 
-        previewAudio.loop = loopPlayback;
+        bool loop = loopPlayback && !recordVideo;
+        previewAudio.loop = loop;
+        previewAudio.pitch = PlaybackSpeed;
         float audioLength = previewAudio.clip.length;
-        bool shouldPlay = play && (loopPlayback || animationTime < audioLength);
+        bool shouldPlay = play && (loop || animationTime < audioLength);
         if (shouldPlay && !previewAudio.isPlaying) previewAudio.Play();
 
         if (audioLength > 0f && previewAudio.clip.samples > 0)
         {
-            float targetTime = loopPlayback ? animationTime % audioLength : Mathf.Min(animationTime, Mathf.Max(0f, audioLength - 0.001f));
+            float targetTime = loop ? animationTime % audioLength : Mathf.Min(animationTime, Mathf.Max(0f, audioLength - 0.001f));
             int targetSample = Mathf.Clamp(Mathf.RoundToInt(targetTime * previewAudio.clip.frequency), 0, previewAudio.clip.samples - 1);
             previewAudio.timeSamples = targetSample;
         }
@@ -424,6 +583,12 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
     private void OnDestroy()
     {
+#if UNITY_EDITOR
+        EditorReleaseAudioLink?.Invoke(this);
+#endif
+        Camera.onPostRender -= OnPreviewCameraRendered;
+        FlushRenderedRecordingFrame();
+        StopRecording();
         RestorePlaybackState();
         if (!previewSessionActive) return;
 
@@ -433,6 +598,14 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         }
         RestoreCamera();
         DestroyBackgroundPlane();
+    }
+
+    private void OnDisable()
+    {
+#if UNITY_EDITOR
+        EditorReleaseAudioLink?.Invoke(this);
+#endif
+        if (recordingActive) EndPreview();
     }
 
     private void DisableUnselectedAvatars()

@@ -1,0 +1,16 @@
+{
+  "name": "com.verafirefly.mmd-playmode-preview",
+  "rootNamespace": "VRChat.MmdPreview",
+  "references": [
+    "VRC.SDKBase"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
