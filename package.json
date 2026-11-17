@@ -9,6 +9,7 @@
     "name": "VeraFirefly"
   },
   "dependencies": {
+    "com.unity.modules.video": "1.0.0",
     "vrchat.blackstartx.gesture-manager": "3.9.8"
   }
 }

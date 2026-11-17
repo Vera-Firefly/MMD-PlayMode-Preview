@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.Video;
 using AvatarDescriptor = VRC.SDKBase.VRC_AvatarDescriptor;
 #if UNITY_EDITOR
 using System;
@@ -45,6 +46,10 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     public GameObject avatar;
     public bool enablePreviewBackground;
     public Texture2D backgroundImage;
+    public VideoClip backgroundVideo;
+    [Min(0f)] public float backgroundVideoTimelineStart;
+    [Min(0f)] public float backgroundVideoClipStart;
+    [Min(0f)] public float backgroundVideoClipEnd;
     public Color backgroundColor = new Color(0.11f, 0.12f, 0.14f);
 
     public AnimationClip animationClip;
@@ -82,6 +87,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     private AudioSource previewAudio;
     private GameObject backgroundPlane;
     private Material backgroundMaterial;
+    private MmdPreviewVideoBackground videoBackground;
     private readonly List<GameObject> disabledAvatars = new List<GameObject>();
     private Vector2 dragStart;
     private int cameraDragButton = -1;
@@ -102,7 +108,6 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     private Vector3 cameraFocus;
     private float cameraExtent = 1f;
     private GameObject lockedAvatar;
-    private Texture2D appliedBackgroundImage;
     private bool previewBackgroundApplied;
     private bool previousCameraAnimationMode;
     private Vector3 lastSynchronizedCameraPosition;
@@ -278,6 +283,8 @@ public sealed class MmdPlayModePreview : MonoBehaviour
             EditorReleaseAudioLink?.Invoke(this);
 #endif
             StopRecording();
+            videoBackground?.Dispose();
+            videoBackground = null;
             RestorePlaybackState();
         }
         previewSessionActive = active;
@@ -417,7 +424,8 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     {
 #if UNITY_EDITOR
         if (camera != previewCamera || !recordingActive || !playbackPlaying ||
-            lastRecordedUnityFrame == Time.frameCount || animationTime >= PlaybackDuration) return;
+            lastRecordedUnityFrame == Time.frameCount || animationTime >= PlaybackDuration ||
+            (videoBackground != null && !videoBackground.IsFrameReady)) return;
         lastRecordedUnityFrame = Time.frameCount;
         if (!recordingTargetWarmedUp)
         {
@@ -606,6 +614,8 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         EditorReleaseAudioLink?.Invoke(this);
 #endif
         if (recordingActive) EndPreview();
+        videoBackground?.Dispose();
+        videoBackground = null;
     }
 
     private void DisableUnselectedAvatars()
@@ -689,7 +699,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
     private void CreateBackgroundPlane()
     {
-        if (!enablePreviewBackground || backgroundImage == null) return;
+        if (!enablePreviewBackground || (backgroundImage == null && backgroundVideo == null)) return;
 
         backgroundPlane = GameObject.CreatePrimitive(PrimitiveType.Quad);
         backgroundPlane.name = "MMD Preview Background";
@@ -697,14 +707,11 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         backgroundMaterial = new Material(Shader.Find("Unlit/Texture"));
         backgroundMaterial.mainTexture = backgroundImage;
         backgroundPlane.GetComponent<MeshRenderer>().sharedMaterial = backgroundMaterial;
-        appliedBackgroundImage = backgroundImage;
     }
 
-    private void UpdateBackgroundImage()
+    private void EnsureBackgroundPlane()
     {
-        if (backgroundImage == appliedBackgroundImage) return;
-        DestroyBackgroundPlane();
-        CreateBackgroundPlane();
+        if (backgroundPlane == null) CreateBackgroundPlane();
     }
 
     private void UpdatePreviewBackground()
@@ -726,16 +733,17 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         previewCamera.clearFlags = CameraClearFlags.SolidColor;
         previewCamera.backgroundColor = backgroundColor;
         previewBackgroundApplied = true;
-        UpdateBackgroundImage();
+        EnsureBackgroundPlane();
     }
 
     private void DestroyBackgroundPlane()
     {
+        videoBackground?.Dispose();
+        videoBackground = null;
         if (backgroundPlane != null) Destroy(backgroundPlane);
         if (backgroundMaterial != null) Destroy(backgroundMaterial);
         backgroundPlane = null;
         backgroundMaterial = null;
-        appliedBackgroundImage = null;
     }
 
     private void UpdateFreeCamera()
@@ -851,8 +859,14 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     private void UpdateBackgroundPlane()
     {
         if (backgroundPlane == null || previewCamera == null) return;
+        if (videoBackground == null) videoBackground = new MmdPreviewVideoBackground(this);
+        videoBackground.Update(animationTime, playbackPlaying && !playbackEnded, recordingActive);
+        Texture texture = videoBackground.Texture != null ? videoBackground.Texture : backgroundImage;
+        backgroundMaterial.mainTexture = texture;
+        backgroundPlane.GetComponent<MeshRenderer>().enabled = texture != null;
         float distance = previewCamera.farClipPlane * 0.5f;
-        float height = 2f * distance * Mathf.Tan(previewCamera.fieldOfView * 0.5f * Mathf.Deg2Rad);
+        float height = previewCamera.orthographic ? 2f * previewCamera.orthographicSize :
+            2f * distance * Mathf.Tan(previewCamera.fieldOfView * 0.5f * Mathf.Deg2Rad);
         backgroundPlane.transform.position = previewCamera.transform.position + previewCamera.transform.forward * distance;
         backgroundPlane.transform.rotation = previewCamera.transform.rotation;
         backgroundPlane.transform.localScale = new Vector3(height * previewCamera.aspect, height, 1f);

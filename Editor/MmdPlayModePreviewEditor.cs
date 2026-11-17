@@ -168,19 +168,23 @@ public sealed class MmdPlayModePreviewEditor : Editor
         {
             DrawAvatarSelector(preview);
         }
-        SerializedProperty enableBackgroundProperty = serializedObject.FindProperty("enablePreviewBackground");
-        EditorGUILayout.PropertyField(enableBackgroundProperty, new GUIContent(
-            L("预览背景", "Preview Background", "プレビュー背景")));
-        if (enableBackgroundProperty.boolValue)
+        using (new EditorGUI.DisabledScope(preview.IsRecording))
         {
-            EditorGUI.indentLevel++;
-            EditorGUILayout.PropertyField(
-                serializedObject.FindProperty("backgroundImage"),
-                new GUIContent(L("图片 (PNG)", "Image (PNG)", "画像 (PNG)")));
-            EditorGUILayout.PropertyField(
-                serializedObject.FindProperty("backgroundColor"),
-                new GUIContent(L("背景颜色", "Background Color", "背景色")));
-            EditorGUI.indentLevel--;
+            SerializedProperty enableBackgroundProperty = serializedObject.FindProperty("enablePreviewBackground");
+            EditorGUILayout.PropertyField(enableBackgroundProperty, new GUIContent(
+                L("预览背景", "Preview Background", "プレビュー背景")));
+            if (enableBackgroundProperty.boolValue)
+            {
+                EditorGUI.indentLevel++;
+                EditorGUILayout.PropertyField(
+                    serializedObject.FindProperty("backgroundImage"),
+                    new GUIContent(L("图片 (PNG)", "Image (PNG)", "画像 (PNG)")));
+                EditorGUILayout.PropertyField(
+                    serializedObject.FindProperty("backgroundColor"),
+                    new GUIContent(L("背景颜色", "Background Color", "背景色")));
+                DrawVideoBackgroundSettings();
+                EditorGUI.indentLevel--;
+            }
         }
         EndColoredSection();
 
@@ -383,6 +387,30 @@ public sealed class MmdPlayModePreviewEditor : Editor
         Texture2D icon = GetPreviewIcon() as Texture2D;
         if (script != null && icon != null)
             EditorGUIUtility.SetIconForObject(script, icon);
+    }
+
+    private void DrawVideoBackgroundSettings()
+    {
+        SerializedProperty video = serializedObject.FindProperty("backgroundVideo");
+        EditorGUILayout.PropertyField(video, new GUIContent(L("视频背景", "Video Background", "動画背景")));
+        var clip = video.objectReferenceValue as UnityEngine.Video.VideoClip;
+        if (clip == null) return;
+        SerializedProperty timeline = serializedObject.FindProperty("backgroundVideoTimelineStart");
+        SerializedProperty start = serializedObject.FindProperty("backgroundVideoClipStart");
+        SerializedProperty end = serializedObject.FindProperty("backgroundVideoClipEnd");
+        timeline.floatValue = Mathf.Max(0f, EditorGUILayout.FloatField(
+            L("预览中开始时间 (秒)", "Timeline Start (s)", "開始タイムライン (秒)"), timeline.floatValue));
+        start.floatValue = Mathf.Max(0f, EditorGUILayout.FloatField(
+            L("视频片段起点 (秒)", "Clip In (s)", "動画の開始 (秒)"), start.floatValue));
+        end.floatValue = Mathf.Max(0f, EditorGUILayout.FloatField(
+            L("视频片段终点 (秒)", "Clip Out (s)", "動画の終了 (秒)"), end.floatValue));
+        double effectiveEnd = end.floatValue > 0 ? System.Math.Min(clip.length, end.floatValue) : clip.length;
+        if (start.floatValue >= effectiveEnd)
+            EditorGUILayout.HelpBox(L("片段起点必须小于终点。", "Clip In must precede Clip Out.", "開始は終了より前に設定してください。"), MessageType.Warning);
+        EditorGUILayout.HelpBox(L(
+            "终点为 0 时使用视频结尾。片段按预览时间同步播放，区间外显示图片/纯色背景；视频原声静音，音轨使用 MMD 音频。录制期间锁定背景设置。",
+            "Clip Out 0 uses the video end. The segment follows preview time; outside it the image/color is shown. Video audio is muted; use the MMD audio clip. Background settings are locked during recording.",
+            "終了が 0 の場合は動画末尾まで。区間外は画像/単色を表示します。動画は無音で、MMD の音声を使用します。録画中は背景設定を固定します。"), MessageType.Info);
     }
 
     private void ForceEnabled()
