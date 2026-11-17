@@ -9,7 +9,7 @@
 - Converter: [VMD Converter Window](https://github.com/Vera-Firefly/VMD-Converter-Window)
 - Offline conversion: [VMD Converter Core](https://github.com/Vera-Firefly/VMD-Converter-Core)
 
-Preview VRChat avatar motion, camera animation, and audio in Unity Play Mode. Current version: **3.0.0-pre**.
+Preview VRChat avatar motion, camera animation, and audio in Unity Play Mode. Current version: **3.0.0**.
 
 ## Dependencies
 
@@ -43,5 +43,7 @@ For a video background, import a video into Unity, enable **Preview Background**
 To record, end playback first, enable **Record Video**, and choose an output folder with the folder icon. **Play** starts recording, **Pause** suspends it, and **Play** resumes the same file. **End** or playback completion saves the MP4. Enable **Compress After Recording**, or click **Compress Last Output (FFmpeg)** afterward. **Last Output** is read-only; its folder icon opens the output location.
 
 Recording advances frame by frame and may run slower than real time in complex scenes. Audio monitoring is muted during capture; the output includes the synchronized clip audio. Set the AudioClip Load Type to **Decompress On Load** and wait for loading to finish. The recorded audio excludes microphones, other scene sources, and AudioMixer effects. Compression creates a separate file and may offer little reduction for already compressed video.
+
+During recording, scene time and avatar Animator/FX controllers advance once per output frame at the recording speed. They freeze while waiting for background video decoding and during recording pauses. Time and Animator update settings are restored afterward. Custom scripts, shaders, or animation systems that use independent clocks are not guaranteed to synchronize.
 
 To use AudioLink, place and activate its component before entering Play Mode, then enable **AudioLink Integration** in Playback Settings. The switch defaults to off: the detected AudioLink object is inactive while off, and activates with the preview audio source when enabled. Leaving preview restores its original activation and audio settings. AudioLink added or activated after Play begins is not eligible until the next session. Keep one active AudioLink analyzer in the scene; if several exist, the preview uses the first detected component.

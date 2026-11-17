@@ -9,7 +9,7 @@
 - 转换器：[VMD Converter Window](https://github.com/Vera-Firefly/VMD-Converter-Window)
 - 离线转换：[VMD Converter Core](https://github.com/Vera-Firefly/VMD-Converter-Core)
 
-在 Unity Play Mode 中预览 VRChat 虚拟形象的动作、镜头动画和音频。当前版本：**3.0.0-pre**。
+在 Unity Play Mode 中预览 VRChat 虚拟形象的动作、镜头动画和音频。当前版本：**3.0.0**。
 
 ## 依赖
 
@@ -43,5 +43,7 @@
 录制视频前，先结束播放，再勾选**视频录制**，通过文件夹图标选择输出位置。点击**播放**开始录制，**暂停**暂存进度，再次**播放**继续同一个文件；点击**结束**或播放完成后保存 MP4。可提前勾选**录制后压缩**，也可录制后点击**压缩上次输出 (FFmpeg)**。**上次输出**为只读输入框，右侧文件夹图标可打开所在位置。
 
 录制采用逐帧方式，复杂场景可能慢于实时。录制期间试听静音，成片保留同步的音频片段。AudioClip 的 Load Type 须设为 **Decompress On Load** 并完成加载；音轨不包含麦克风、其它场景音源或 AudioMixer 效果。压缩会另存文件，已高度压缩的视频可能没有明显体积收益。
+
+录制期间，场景时间及虚拟形象的 Animator／FX 控制器按录制倍速逐帧推进；等待背景视频解码及暂停录制时冻结，结束后恢复时间与 Animator 更新设置。自行使用不受场景时间控制的脚本、着色器或动画系统不保证同步。
 
 接入 AudioLink 时，在进入 Play 前放置并激活 AudioLink 组件，进入后在“播放设置”勾选 **AudioLink接入**。该开关默认关闭：关闭时停用检测到的 AudioLink 对象，勾选后激活并接入预览音源；退出预览后恢复原激活状态和音源设置。进入 Play 后才新建或激活的 AudioLink 需等下次会话才能接入。建议场景只保留一个激活的 AudioLink 分析器；存在多个时使用检测到的第一个。

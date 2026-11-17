@@ -14,6 +14,8 @@ internal sealed class MmdPreviewVideoBackground : IDisposable
     private bool pending;
     private bool visible;
     private bool exactFrame;
+    private double lastTimeline = double.NaN;
+    private bool previousExactFrame = true;
     private long requestedFrame = -1;
     private long decodedFrame = -1;
     private double operationStarted;
@@ -25,6 +27,11 @@ internal sealed class MmdPreviewVideoBackground : IDisposable
     public void Update(float timeline, bool playing, bool recording)
     {
         exactFrame = recording || !playing;
+        bool discontinuity = !double.IsNaN(lastTimeline) &&
+            (timeline < lastTimeline || Math.Abs(timeline - lastTimeline) > Math.Max(.25, Time.unscaledDeltaTime * owner.PlaybackSpeed * 3));
+        bool resumed = previousExactFrame && !exactFrame;
+        lastTimeline = timeline;
+        previousExactFrame = exactFrame;
         if (clip != owner.backgroundVideo)
         {
             Dispose();
@@ -52,6 +59,8 @@ internal sealed class MmdPreviewVideoBackground : IDisposable
         }
 
         visible = true;
+        player.timeReference = exactFrame ? VideoTimeReference.Freerun : VideoTimeReference.ExternalTime;
+        player.skipOnDrop = !exactFrame;
         double rate = clip.frameRate > 0 ? clip.frameRate : 30;
         long frame = Math.Min((long)clip.frameCount - 1, Math.Max(0, (long)Math.Floor(sourceTime * rate + 0.00001)));
         if (exactFrame)
@@ -62,10 +71,11 @@ internal sealed class MmdPreviewVideoBackground : IDisposable
         }
         else
         {
-            // Continuous decoding keeps ordinary preview fast. Correct drift after
-            // seeks, loops and speed changes without seeking on every render frame.
+            // External time corrects decoder drift without repeated expensive
+            // seeks, especially for videos that also contain audio streams.
+            player.externalReferenceTime = sourceTime;
             player.playbackSpeed = owner.PlaybackSpeed;
-            if (decodedFrame < 0 || Math.Abs(player.time - sourceTime) > 0.12)
+            if (decodedFrame < 0 || discontinuity || (resumed && Math.Abs(player.time - sourceTime) > .12))
                 RequestFrame(frame);
             if (!pending && !player.isPlaying) player.Play();
         }
@@ -77,9 +87,15 @@ internal sealed class MmdPreviewVideoBackground : IDisposable
         decoderObject = new GameObject("MMD Preview Video Decoder") { hideFlags = HideFlags.HideAndDontSave };
         player = decoderObject.AddComponent<VideoPlayer>();
         player.playOnAwake = false;
+        // Decoding must continue while the recording simulation is frozen.
+        player.timeUpdateMode = VideoTimeUpdateMode.UnscaledGameTime;
         player.source = VideoSource.VideoClip;
         player.clip = clip;
         player.audioOutputMode = VideoAudioOutputMode.None;
+        player.controlledAudioTrackCount = (ushort)Math.Min((int)clip.audioTrackCount, 64);
+        for (ushort track = 0; track < player.controlledAudioTrackCount; track++)
+            player.EnableAudioTrack(track, false);
+        player.timeReference = VideoTimeReference.Freerun;
         player.renderMode = VideoRenderMode.RenderTexture;
         player.waitForFirstFrame = true;
         player.skipOnDrop = false;
@@ -154,5 +170,7 @@ internal sealed class MmdPreviewVideoBackground : IDisposable
         pending = visible = false;
         requestedFrame = decodedFrame = -1;
         IsFrameReady = true;
+        lastTimeline = double.NaN;
+        previousExactFrame = true;
     }
 }

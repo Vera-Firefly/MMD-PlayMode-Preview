@@ -202,12 +202,12 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         {
             UpdateFreeCamera();
         }
-        UpdateBackgroundPlane();
         if (recordingActive && playbackPlaying)
         {
             animationTime = (float)(recordingStartTime +
                 (double)recordingFrameIndex * recordingSpeed / RecordingFrameRate);
         }
+        UpdateBackgroundPlane();
     }
 
     private void LateUpdate()
@@ -367,6 +367,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         FlushRenderedRecordingFrame();
         playbackPlaying = false;
         if (previewAudio != null) previewAudio.Pause();
+        if (recordingActive) Time.timeScale = 0f;
     }
 
     public void ResetPreview()
@@ -436,6 +437,9 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         // at the next Update, before the camera can overwrite the finished frame.
         recordingFramePending = true;
         pendingRecordingTime = animationTime;
+        // Permit exactly one simulation step for the next accepted output frame.
+        // Decoder-only frames and pauses must not advance avatar controllers.
+        Time.timeScale = 1f;
 #endif
     }
 
@@ -446,6 +450,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         recordingFramePending = false;
         EditorCaptureRecordingFrame?.Invoke(this, pendingRecordingTime, recordingSpeed);
         if (recordingActive) recordingFrameIndex++;
+        if (recordingActive) Time.timeScale = 0f;
 #endif
     }
 

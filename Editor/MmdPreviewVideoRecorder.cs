@@ -186,6 +186,15 @@ internal static class MmdPreviewVideoRecorder
         private readonly float previousAspect;
         private readonly float previousCaptureDelta;
         private readonly float previousFixedDelta;
+        private readonly float previousTimeScale;
+        private readonly List<AnimatorClock> animatorClocks = new List<AnimatorClock>();
+        private sealed class AnimatorClock
+        {
+            internal Animator animator;
+            internal AnimatorUpdateMode mode;
+            internal UnityEngine.Playables.PlayableGraph graph;
+            internal UnityEngine.Playables.DirectorUpdateMode graphMode;
+        }
         private readonly bool previousRunInBackground;
         private readonly int previousVSyncCount;
         private readonly int previousTargetFrameRate;
@@ -228,6 +237,7 @@ internal static class MmdPreviewVideoRecorder
             previousAspect = camera.aspect;
             previousCaptureDelta = Time.captureDeltaTime;
             previousFixedDelta = Time.fixedDeltaTime;
+            previousTimeScale = Time.timeScale;
             previousRunInBackground = Application.runInBackground;
             previousVSyncCount = QualitySettings.vSyncCount;
             previousTargetFrameRate = Application.targetFrameRate;
@@ -289,6 +299,21 @@ internal static class MmdPreviewVideoRecorder
                     camera.clearFlags = CameraClearFlags.SolidColor;
                 Time.captureDeltaTime = speed / MmdPlayModePreview.RecordingFrameRate;
                 Time.fixedDeltaTime = Time.captureDeltaTime;
+                // A decoder may need several Unity frames for one output frame.
+                // Only accepted captures grant the next simulation step.
+                Time.timeScale = 0f;
+                foreach (Animator animator in preview.avatar.GetComponentsInChildren<Animator>(true))
+                {
+                    var clock = new AnimatorClock { animator = animator, mode = animator.updateMode, graph = animator.playableGraph };
+                    animator.updateMode = AnimatorUpdateMode.Normal;
+                    if (clock.graph.IsValid())
+                    {
+                        clock.graphMode = clock.graph.GetTimeUpdateMode();
+                        if (clock.graphMode == UnityEngine.Playables.DirectorUpdateMode.UnscaledGameTime)
+                            clock.graph.SetTimeUpdateMode(UnityEngine.Playables.DirectorUpdateMode.GameTime);
+                    }
+                    animatorClocks.Add(clock);
+                }
                 Application.runInBackground = true;
                 QualitySettings.vSyncCount = 0;
                 Application.targetFrameRate = -1;
@@ -464,6 +489,13 @@ internal static class MmdPreviewVideoRecorder
                 }
                 Time.captureDeltaTime = previousCaptureDelta;
                 Time.fixedDeltaTime = previousFixedDelta;
+                Time.timeScale = previousTimeScale;
+                foreach (AnimatorClock clock in animatorClocks)
+                {
+                    if (clock.animator != null) clock.animator.updateMode = clock.mode;
+                    if (clock.graph.IsValid()) clock.graph.SetTimeUpdateMode(clock.graphMode);
+                }
+                animatorClocks.Clear();
                 Application.runInBackground = previousRunInBackground;
                 QualitySettings.vSyncCount = previousVSyncCount;
                 Application.targetFrameRate = previousTargetFrameRate;
