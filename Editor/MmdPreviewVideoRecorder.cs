@@ -56,6 +56,7 @@ internal static class MmdPreviewVideoRecorder
         LastError = null;
         try
         {
+            if (preview.enableSpoutOutput) throw new InvalidOperationException("请先关闭 OBS 画面输出再录制。Disable OBS output before offline recording.");
             if (Recordings.Count != 0) throw new InvalidOperationException("另一个预览正在录制。Another preview is recording.");
             if (string.IsNullOrWhiteSpace(preview.recordingOutputDirectory) ||
                 !Path.IsPathRooted(preview.recordingOutputDirectory) || !Directory.Exists(preview.recordingOutputDirectory))

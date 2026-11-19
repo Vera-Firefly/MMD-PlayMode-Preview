@@ -40,6 +40,11 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     internal static Action<MmdPlayModePreview> EditorStopRecording;
     internal static Action<MmdPlayModePreview> EditorUpdateAudioLink;
     internal static Action<MmdPlayModePreview> EditorReleaseAudioLink;
+    internal static Action<MmdPlayModePreview> EditorUpdateVideoOutput;
+    internal static Action<MmdPlayModePreview> EditorReleaseVideoOutput;
+    internal static Func<MmdPlayModePreview, bool> EditorBeforePlay;
+    internal static Action<MmdPlayModePreview> EditorPlaybackEnded;
+    internal static Action<MmdPlayModePreview> EditorReleaseObs;
 #endif
 
     [Header("Preview")]
@@ -60,6 +65,10 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     public bool recordVideo;
     public bool compressRecordedVideo;
     public string recordingOutputDirectory = "";
+    public bool enableSpoutOutput;
+    public string spoutSenderName = "MMD Play Mode Preview";
+    public Vector2Int spoutOutputSize = new Vector2Int(1920, 1080);
+    public bool syncObsRecording;
     public MmdPreviewDurationSource playbackDurationSource = MmdPreviewDurationSource.Animation;
 
     [HideInInspector] public Component gestureManager;
@@ -156,11 +165,11 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         InitializeCameraSettings();
         UpdatePreviewBackground();
         RefreshRecordingAvailability();
-        if (recordVideo) loopPlayback = false;
+        if (recordVideo || IsObsRecordingLinked) loopPlayback = false;
         playbackSpeed = Mathf.Clamp(playbackSpeed, 0.1f, 3f);
         previewAudio = gameObject.AddComponent<AudioSource>();
         previewAudio.playOnAwake = false;
-        previewAudio.loop = loopPlayback;
+        previewAudio.loop = CanLoopPlayback;
         previewAudio.clip = audioClip;
         previewAudio.pitch = PlaybackSpeed;
         playbackPlaying = false;
@@ -181,8 +190,11 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         FlushRenderedRecordingFrame();
 
         RefreshRecordingAvailability();
-        if (recordVideo) loopPlayback = false;
+        if (recordVideo || IsObsRecordingLinked) loopPlayback = false;
         UpdatePreviewBackground();
+#if UNITY_EDITOR
+        EditorUpdateVideoOutput?.Invoke(this);
+#endif
 
         bool cameraAnimationMode = IsCameraAnimationMode;
         if (cameraAnimationMode != previousCameraAnimationMode)
@@ -219,7 +231,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
         if (previewAudio != null)
         {
-            previewAudio.loop = loopPlayback && !recordVideo;
+            previewAudio.loop = CanLoopPlayback;
             previewAudio.pitch = PlaybackSpeed;
         }
         if (recordingActive)
@@ -241,7 +253,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
             float duration = PlaybackDuration;
             if (duration > 0f && animationTime >= duration)
             {
-                if (loopPlayback && !recordVideo)
+                if (CanLoopPlayback)
                 {
                     animationTime %= duration;
                     SyncAudio(true);
@@ -265,6 +277,8 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
     public bool IsPlaybackEnded => playbackEnded;
     public bool IsRecording => recordingActive;
+    public bool IsObsRecordingLinked => enableSpoutOutput && syncObsRecording;
+    private bool CanLoopPlayback => loopPlayback && !recordVideo && !IsObsRecordingLinked;
     public float PlaybackSpeed => recordingActive ? recordingSpeed : Mathf.Clamp(playbackSpeed, 0.1f, 3f);
     public Camera PreviewCamera => previewCamera;
     internal AudioSource PreviewAudioSource => previewAudio;
@@ -281,6 +295,8 @@ public sealed class MmdPlayModePreview : MonoBehaviour
         {
 #if UNITY_EDITOR
             EditorReleaseAudioLink?.Invoke(this);
+            EditorReleaseVideoOutput?.Invoke(this);
+            EditorReleaseObs?.Invoke(this);
 #endif
             StopRecording();
             videoBackground?.Dispose();
@@ -320,9 +336,23 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     {
         if (!previewSessionActive || !HasPlaybackContent || PlaybackDuration <= 0f) return;
         if (playbackPlaying) return;
+        if (IsObsRecordingLinked) loopPlayback = false;
+#if UNITY_EDITOR
+        if (EditorBeforePlay != null && EditorBeforePlay(this)) return;
+#endif
         RefreshRecordingAvailability();
+#if UNITY_EDITOR
+        // A live GPU feed uses real-time audio and must not share the offline
+        // recorder's frame-stepped clock or camera render target.
+        if (enableSpoutOutput) recordVideo = false;
+#endif
         if (recordVideo)
         {
+#if UNITY_EDITOR
+            // A toggle and Play can arrive in the same Inspector event, before
+            // Update has released the live camera target.
+            EditorReleaseVideoOutput?.Invoke(this);
+#endif
             loopPlayback = false;
             if (!recordingActive)
             {
@@ -363,7 +393,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
     public void PausePreview()
     {
-        if (!previewSessionActive) return;
+        if (!previewSessionActive || IsObsRecordingLinked) return;
         FlushRenderedRecordingFrame();
         playbackPlaying = false;
         if (previewAudio != null) previewAudio.Pause();
@@ -372,7 +402,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
     public void ResetPreview()
     {
-        if (!previewSessionActive || recordingActive) return;
+        if (!previewSessionActive || recordingActive || IsObsRecordingLinked) return;
         CapturePlaybackState();
         playbackPlaying = false;
         playbackEnded = false;
@@ -389,7 +419,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
 
     public void SeekPreview(float time)
     {
-        if (!previewSessionActive || recordingActive) return;
+        if (!previewSessionActive || recordingActive || IsObsRecordingLinked) return;
         CapturePlaybackState();
         playbackEnded = false;
         animationTime = Mathf.Clamp(time, 0f, PlaybackDuration);
@@ -419,6 +449,9 @@ public sealed class MmdPlayModePreview : MonoBehaviour
             UpdateBackgroundPlane();
         }
         endingPreview = false;
+#if UNITY_EDITOR
+        EditorPlaybackEnded?.Invoke(this);
+#endif
     }
 
     private void OnPreviewCameraRendered(Camera camera)
@@ -496,7 +529,7 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     {
         if (previewAudio == null || previewAudio.clip == null) return;
 
-        bool loop = loopPlayback && !recordVideo;
+        bool loop = CanLoopPlayback;
         previewAudio.loop = loop;
         previewAudio.pitch = PlaybackSpeed;
         float audioLength = previewAudio.clip.length;
@@ -598,6 +631,8 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     {
 #if UNITY_EDITOR
         EditorReleaseAudioLink?.Invoke(this);
+        EditorReleaseVideoOutput?.Invoke(this);
+        EditorReleaseObs?.Invoke(this);
 #endif
         Camera.onPostRender -= OnPreviewCameraRendered;
         FlushRenderedRecordingFrame();
@@ -617,6 +652,8 @@ public sealed class MmdPlayModePreview : MonoBehaviour
     {
 #if UNITY_EDITOR
         EditorReleaseAudioLink?.Invoke(this);
+        EditorReleaseVideoOutput?.Invoke(this);
+        EditorReleaseObs?.Invoke(this);
 #endif
         if (recordingActive) EndPreview();
         videoBackground?.Dispose();

@@ -227,8 +227,10 @@ public sealed class MmdPlayModePreviewEditor : Editor
         SerializedProperty recordVideo = serializedObject.FindProperty("recordVideo");
         if (!preview.IsRecording && !MmdPreviewVideoRecorder.IsEncoderAvailable) recordVideo.boolValue = false;
         SerializedProperty loopPlayback = serializedObject.FindProperty("loopPlayback");
-        if (recordVideo.boolValue) loopPlayback.boolValue = false;
-        using (new EditorGUI.DisabledScope(recordVideo.boolValue))
+        bool obsRecording = serializedObject.FindProperty("enableSpoutOutput").boolValue &&
+            serializedObject.FindProperty("syncObsRecording").boolValue;
+        if (recordVideo.boolValue || obsRecording) loopPlayback.boolValue = false;
+        using (new EditorGUI.DisabledScope(recordVideo.boolValue || obsRecording))
             EditorGUILayout.PropertyField(loopPlayback,
                 new GUIContent(L("循环播放", "Loop Playback", "ループ再生")));
 
@@ -255,7 +257,11 @@ public sealed class MmdPlayModePreviewEditor : Editor
                 new GUIContent(L("移动速度", "Move Speed", "移動速度")));
         }
         EndColoredSection();
-        if (Application.isPlaying) DrawPlaybackSettings(preview);
+        if (Application.isPlaying)
+        {
+            DrawVideoOutput(preview);
+            DrawPlaybackSettings(preview);
+        }
         serializedObject.ApplyModifiedProperties();
 
         if (Application.isPlaying && preview.HasPlaybackContent)
@@ -511,18 +517,19 @@ public sealed class MmdPlayModePreviewEditor : Editor
             GUIContent playPauseIcon = preview.IsPlaybackPlaying
                 ? GetIconContent("PauseButton", "Ⅱ", L("暂停", "Pause", "一時停止"))
                 : GetIconContent("PlayButton", "▶", L("播放", "Play", "再生"));
+            using (new EditorGUI.DisabledScope(MmdPreviewObsRecording.IsBusy || (preview.IsObsRecordingLinked && preview.IsPlaybackPlaying)))
             if (GUILayout.Button(playPauseIcon, GUILayout.Width(36f), GUILayout.Height(26f)))
             {
                 if (preview.IsPlaybackPlaying) preview.PausePreview();
                 else preview.PlayPreview();
             }
-            using (new EditorGUI.DisabledScope(preview.IsRecording))
+            using (new EditorGUI.DisabledScope(preview.IsRecording || preview.IsObsRecordingLinked || MmdPreviewObsRecording.HasSession))
                 if (GUILayout.Button(
                         GetIconContent("Animation.FirstKey", "↶", L("重置到开头", "Reset to Start", "先頭に戻す")),
                         GUILayout.Width(36f),
                         GUILayout.Height(26f)))
                     preview.ResetPreview();
-            using (new EditorGUI.DisabledScope(preview.IsPlaybackEnded))
+            using (new EditorGUI.DisabledScope(preview.IsPlaybackEnded && !MmdPreviewObsRecording.HasSession))
                 if (GUILayout.Button(
                         GetIconContent("winbtn_win_close", "■", L("结束动作", "End Motion", "モーション終了")),
                         GUILayout.Width(36f),
@@ -534,7 +541,7 @@ public sealed class MmdPlayModePreviewEditor : Editor
         if (!preview.IsPlaybackEnded)
         {
             float duration = Mathf.Max(0f, preview.PlaybackDuration);
-            using (new EditorGUI.DisabledScope(preview.IsRecording))
+            using (new EditorGUI.DisabledScope(preview.IsRecording || preview.IsObsRecordingLinked || MmdPreviewObsRecording.HasSession))
             {
                 EditorGUI.BeginChangeCheck();
                 float time = EditorGUILayout.Slider(preview.PlaybackTime, 0f, duration);
@@ -562,6 +569,66 @@ public sealed class MmdPlayModePreviewEditor : Editor
                 }
             }
         }
+    }
+
+    private void DrawVideoOutput(MmdPlayModePreview preview)
+    {
+        BeginColoredSection(L("OBS 画面输出", "OBS Video Output", "OBS 映像出力"), new Color(0.38f, 0.35f, 0.63f));
+        bool available = MmdPreviewSpoutOutput.IsAvailable;
+        SerializedProperty enabled = serializedObject.FindProperty("enableSpoutOutput");
+        using (new EditorGUI.DisabledScope(!available || preview.IsRecording))
+            EditorGUILayout.PropertyField(enabled, new GUIContent(L("Spout2 输出", "Spout2 Output", "Spout2 出力")));
+        if (!available)
+            EditorGUILayout.HelpBox(L("Spout2 输出需要 Windows x64、Direct3D 11/12、Built-in Render Pipeline 及内置原生插件；其它预览功能不受影响。",
+                "Spout2 requires Windows x64, Direct3D 11/12, Built-in RP and the bundled native plugin. Other preview features remain available.",
+                "Spout2 は Windows x64、Direct3D 11/12、Built-in RP と同梱プラグインが必要です。他の機能は利用できます。"), MessageType.Info);
+        using (new EditorGUI.DisabledScope(enabled.boolValue || preview.IsRecording || !available))
+        {
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("spoutSenderName"),
+                new GUIContent(L("输出名称", "Sender Name", "送信名"), L("使用英文、数字及 ASCII 符号；重名时自动添加编号。", "Use printable ASCII; duplicate names receive a suffix.", "半角英数・ASCII 記号を使用。重複時は番号を追加します。")));
+            SerializedProperty size = serializedObject.FindProperty("spoutOutputSize");
+            size.vector2IntValue = EditorGUILayout.Vector2IntField(L("输出尺寸", "Output Size", "出力サイズ"), size.vector2IntValue);
+        }
+        if (enabled.boolValue)
+        {
+            serializedObject.FindProperty("recordVideo").boolValue = false;
+            string name = MmdPreviewSpoutOutput.GetSenderName(preview);
+            if (!string.IsNullOrEmpty(name))
+                using (new EditorGUI.DisabledScope(true))
+                    EditorGUILayout.TextField(L("当前输出", "Active Sender", "送信中"), name);
+            EditorGUILayout.HelpBox(L("在 OBS 添加“Spout2 Capture”并选择此输出。仅发送预览摄像机画面；声音使用 OBS“应用程序音频采集”选择 Unity。直播输出与逐帧视频录制互斥，请在 OBS 中录制。",
+                "In OBS, add Spout2 Capture and select this sender. Camera video only; capture Unity with Application Audio Capture for sound. Live output excludes offline recording; record in OBS.",
+                "OBS で Spout2 Capture を追加し送信名を選択。映像のみ送信するため、音声はアプリケーション音声キャプチャで Unity を選択。フレーム録画と併用できません。録画は OBS で行ってください。"), MessageType.Info);
+        }
+        string error = MmdPreviewSpoutOutput.GetError(preview);
+        if (!string.IsNullOrEmpty(error)) EditorGUILayout.HelpBox(error, MessageType.Error);
+        using (new EditorGUI.DisabledScope(!enabled.boolValue || preview.IsRecording || MmdPreviewObsRecording.IsBusy))
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("syncObsRecording"),
+                new GUIContent(L("同步 OBS 录制", "Sync OBS Recording", "OBS 録画を同期")));
+        if (serializedObject.FindProperty("syncObsRecording").boolValue)
+        {
+            if (enabled.boolValue) serializedObject.FindProperty("loopPlayback").boolValue = false;
+            using (new EditorGUI.DisabledScope(MmdPreviewObsRecording.IsConnected || MmdPreviewObsRecording.IsBusy))
+            {
+                string endpoint = EditorGUILayout.TextField(L("WebSocket 地址", "WebSocket URL", "WebSocket URL"), MmdPreviewObsRecording.Endpoint);
+                if (endpoint != MmdPreviewObsRecording.Endpoint) MmdPreviewObsRecording.Endpoint = endpoint;
+                MmdPreviewObsRecording.Password = EditorGUILayout.PasswordField(L("密码", "Password", "パスワード"), MmdPreviewObsRecording.Password);
+            }
+            using (new EditorGUI.DisabledScope(MmdPreviewObsRecording.IsBusy))
+            {
+                if (GUILayout.Button(MmdPreviewObsRecording.IsConnected
+                    ? L("断开 OBS", "Disconnect OBS", "OBS を切断") : L("连接 OBS", "Connect OBS", "OBS に接続")))
+                {
+                    if (MmdPreviewObsRecording.IsConnected) MmdPreviewObsRecording.Disconnect();
+                    else MmdPreviewObsRecording.Connect();
+                }
+            }
+            EditorGUILayout.HelpBox(MmdPreviewObsRecording.Status, MessageType.Info);
+            EditorGUILayout.HelpBox(L("在 OBS“工具 → WebSocket 服务器设置”启用服务器，填写地址和密码后连接。播放启动 OBS 录制，结束或播放完成后停止保存。联动时禁用循环、暂停、重置和进度拖动，仅允许播放和结束。密码仅保存在本次编辑器会话中。",
+                "Enable the OBS WebSocket server under Tools, then enter its URL and password and connect. Play starts recording; End/completion saves it. Loop, Pause, Reset and seeking are disabled while linked; use Play and End only. The password is held only in memory.",
+                "OBS のツールで WebSocket サーバーを有効にし、URL とパスワードで接続。再生で録画開始、終了で保存。連動中はループ・一時停止・リセット・シークを無効にし、再生と終了のみ使用できます。パスワードはメモリのみ保持します。"), MessageType.Info);
+        }
+        EndColoredSection();
     }
 
     private void DrawPlaybackSettings(MmdPlayModePreview preview)
@@ -596,7 +663,8 @@ public sealed class MmdPlayModePreviewEditor : Editor
             EditorGUILayout.HelpBox(L("进入 Play 前未检测到激活且启用的 AudioLink 组件。", "No active, enabled AudioLink was found before Play Mode.", "Play 前に有効な AudioLink が検出されませんでした。"), MessageType.Info);
         bool encoderAvailable = MmdPreviewVideoRecorder.IsEncoderAvailable;
         if (!encoderAvailable && !preview.IsRecording) recording.boolValue = false;
-        using (new EditorGUI.DisabledScope(!encoderAvailable || !preview.IsPlaybackEnded || preview.IsRecording))
+        using (new EditorGUI.DisabledScope(!encoderAvailable || preview.enableSpoutOutput ||
+            serializedObject.FindProperty("enableSpoutOutput").boolValue || !preview.IsPlaybackEnded || preview.IsRecording))
             EditorGUILayout.PropertyField(recording,
                 new GUIContent(L("视频录制", "Record Video", "動画を録画")));
         if (!encoderAvailable)
