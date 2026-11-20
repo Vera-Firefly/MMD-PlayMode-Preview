@@ -9,7 +9,7 @@
 - 转换器：[VMD Converter Window](https://github.com/Vera-Firefly/VMD-Converter-Window)
 - 离线转换：[VMD Converter Core](https://github.com/Vera-Firefly/VMD-Converter-Core)
 
-在 Unity Play Mode 中预览 VRChat 虚拟形象的动作、镜头动画和音频。当前版本：**3.0.0**。
+在 Unity Play Mode 中预览 VRChat 虚拟形象的动作、镜头动画和音频。当前版本：**3.0.1**。
 
 ## 依赖
 

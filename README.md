@@ -9,7 +9,7 @@
 - Converter: [VMD Converter Window](https://github.com/Vera-Firefly/VMD-Converter-Window)
 - Offline conversion: [VMD Converter Core](https://github.com/Vera-Firefly/VMD-Converter-Core)
 
-Preview VRChat avatar motion, camera animation, and audio in Unity Play Mode. Current version: **3.0.0**.
+Preview VRChat avatar motion, camera animation, and audio in Unity Play Mode. Current version: **3.0.1**.
 
 ## Dependencies
 
